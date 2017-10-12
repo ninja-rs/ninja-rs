@@ -1,0 +1,11 @@
+[package]
+name = "ninja"
+version = "0.1.0"
+authors = ["CrLF0710 <crlf0710@gmail.com>"]
+build = "build.rs"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1.0"

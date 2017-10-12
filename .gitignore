@@ -32,3 +32,9 @@ TAGS
 # Ninja output
 .ninja_deps
 .ninja_log
+
+# Rust stuff
+/target/
+**/*.rs.bk
+Cargo.lock
+
