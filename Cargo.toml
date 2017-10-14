@@ -1,11 +1,18 @@
 [package]
 name = "ninja"
-version = "0.1.0"
+version = "1.8.2-git"
 authors = ["CrLF0710 <crlf0710@gmail.com>"]
 build = "build.rs"
 
 [dependencies]
 libc = "0.2"
+errno = "0.2"
+murmurhash64 = "0.3"
+clap = "2"
+
+[target."cfg(windows)".dependencies]
+winapi = "0.2"
+kernel32-sys = "0.2"
 
 [build-dependencies]
-cc = "1.0"
+cc = "1"

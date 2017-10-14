@@ -1,16 +1,181 @@
-// Copyright 2011 Google Inc. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+use std;
+use libc;
+use errno;
+#[cfg(windows)]
+use kernel32;
+
+macro_rules! explain {
+    ($fmt:expr) => 
+        (if $crate::debug_flags::EXPLAINING {
+            eprint!(concat!("ninja explain: ", $fmt, "\n"))
+        });
+    ($fmt:expr, $($arg:tt)*) =>
+        (if $crate::debug_flags::EXPLAINING {
+            eprint!(concat!("ninja explain: ", $fmt, "\n"), $($arg)*)
+        });
+}
+
+/// Log a fatal message and exit.
+macro_rules! fatal {
+    ($fmt:expr) => 
+        ({
+            eprint!(concat!("ninja warning: ", $fmt, "\n"));
+            $crate::utils::exit();
+        });
+    ($fmt:expr, $($arg:tt)*) =>
+        ({
+            eprint!(concat!("ninja warning: ", $fmt, "\n"), $($arg)*);
+            $crate::utils::exit();
+        });
+}
+
+/// Log a warning message.
+macro_rules! warning {
+    ($fmt:expr) => 
+        (eprint!(concat!("ninja warning: ", $fmt, "\n")));
+    ($fmt:expr, $($arg:tt)*) =>
+        (eprint!(concat!("ninja warning: ", $fmt, "\n"), $($arg)*));
+}
+
+/// Log an error message.
+macro_rules! error {
+    ($fmt:expr) => 
+        (eprint!(concat!("ninja error: ", $fmt, "\n")));
+    ($fmt:expr, $($arg:tt)*) =>
+        (eprint!(concat!("ninja error: ", $fmt, "\n"), $($arg)*));
+}
+
+#[cfg(windows)]
+pub fn exit() -> ! {
+    use std::io::Write;
+
+    // On Windows, some tools may inject extra threads.
+    // exit() may block on locks held by those threads, so forcibly exit.
+    std::io::stderr().flush();
+    std::io::stdout().flush();
+    unsafe {
+        kernel32::ExitProcess(1);
+    }
+    unreachable!()
+}
+
+#[cfg(not(windows))]
+pub fn exit() -> ! {
+    unsafe {
+        libc::exit(1);
+    }
+    unreachable!()
+}
+
+pub trait ZeroOrErrnoResult {
+    fn as_zero_errno_result(self) -> Result<(), errno::Errno>; 
+}
+
+impl ZeroOrErrnoResult for libc::c_int {
+    fn as_zero_errno_result(self) -> Result<(), errno::Errno> {
+        if self == 0 {
+            Ok(())
+        } else {
+            Err(errno::errno())
+        }
+    }
+}
+
+pub fn set_stdout_linebuffered() {
+    extern {
+        fn ninja_get_c_stdout() -> * mut libc::FILE;
+    }
+    unsafe {
+        libc::setvbuf(ninja_get_c_stdout(), std::ptr::null_mut(), libc::_IOLBF, libc::BUFSIZ as _);
+    }
+}
+
+/*
+
+#ifdef _WIN32
+#include "win32port.h"
+#else
+#include <stdint.h>
+#endif
+
+#include <string>
+#include <vector>
+using namespace std;
+
+#ifdef _MSC_VER
+#define NORETURN __declspec(noreturn)
+#else
+#define NORETURN __attribute__((noreturn))
+#endif
+
+/// Canonicalize a path like "foo/../bar.h" into just "bar.h".
+/// |slash_bits| has bits set starting from lowest for a backslash that was
+/// normalized to a forward slash. (only used on Windows)
+bool CanonicalizePath(string* path, uint64_t* slash_bits, string* err);
+bool CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits,
+                      string* err);
+
+/// Appends |input| to |*result|, escaping according to the whims of either
+/// Bash, or Win32's CommandLineToArgvW().
+/// Appends the string directly to |result| without modification if we can
+/// determine that it contains no problematic characters.
+void GetShellEscapedString(const string& input, string* result);
+void GetWin32EscapedString(const string& input, string* result);
+
+/// Read a file to a string (in text mode: with CRLF conversion
+/// on Windows).
+/// Returns -errno and fills in \a err on error.
+int ReadFile(const string& path, string* contents, string* err);
+
+/// Mark a file descriptor to not be inherited on exec()s.
+void SetCloseOnExec(int fd);
+
+/// Given a misspelled string and a list of correct spellings, returns
+/// the closest match or NULL if there is no close enough match.
+const char* SpellcheckStringV(const string& text,
+                              const vector<const char*>& words);
+
+/// Like SpellcheckStringV, but takes a NULL-terminated list.
+const char* SpellcheckString(const char* text, ...);
+
+bool islatinalpha(int c);
+
+/// Removes all Ansi escape codes (http://www.termsys.demon.co.uk/vtansi.htm).
+string StripAnsiEscapeCodes(const string& in);
+
+/// @return the number of processors on the machine.  Useful for an initial
+/// guess for how many jobs to run in parallel.  @return 0 on error.
+int GetProcessorCount();
+
+/// @return the load average of the machine. A negative value is returned
+/// on error.
+double GetLoadAverage();
+
+/// Elide the given string @a str with '...' in the middle if the length
+/// exceeds @a width.
+string ElideMiddle(const string& str, size_t width);
+
+/// Truncates a file to the given size.
+bool Truncate(const string& path, size_t size, string* err);
+
+#ifdef _MSC_VER
+#define snprintf _snprintf
+#define fileno _fileno
+#define unlink _unlink
+#define chdir _chdir
+#define strtoull _strtoui64
+#define getcwd _getcwd
+#define PATH_MAX _MAX_PATH
+#endif
+
+#ifdef _WIN32
+/// Convert the value returned by GetLastError() into a string.
+string GetLastErrorString();
+
+/// Calls Fatal() with a function name and GetLastErrorString.
+NORETURN void Win32Fatal(const char* function);
+#endif
+
 
 #include "util.h"
 
@@ -53,42 +218,6 @@
 
 #include "edit_distance.h"
 #include "metrics.h"
-
-void Fatal(const char* msg, ...) {
-  va_list ap;
-  fprintf(stderr, "ninja: fatal: ");
-  va_start(ap, msg);
-  vfprintf(stderr, msg, ap);
-  va_end(ap);
-  fprintf(stderr, "\n");
-#ifdef _WIN32
-  // On Windows, some tools may inject extra threads.
-  // exit() may block on locks held by those threads, so forcibly exit.
-  fflush(stderr);
-  fflush(stdout);
-  ExitProcess(1);
-#else
-  exit(1);
-#endif
-}
-
-void Warning(const char* msg, ...) {
-  va_list ap;
-  fprintf(stderr, "ninja: warning: ");
-  va_start(ap, msg);
-  vfprintf(stderr, msg, ap);
-  va_end(ap);
-  fprintf(stderr, "\n");
-}
-
-void Error(const char* msg, ...) {
-  va_list ap;
-  fprintf(stderr, "ninja: error: ");
-  va_start(ap, msg);
-  vfprintf(stderr, msg, ap);
-  va_end(ap);
-  fprintf(stderr, "\n");
-}
 
 bool CanonicalizePath(string* path, uint64_t* slash_bits, string* err) {
   METRIC_RECORD("canonicalize str");
@@ -606,6 +735,6 @@ bool Truncate(const string& path, size_t size, string* err) {
 }
 
 
-extern "C" FILE* ninja_get_c_stdout() {
-  return stdout;
-}
+
+
+*/
