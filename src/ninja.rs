@@ -16,14 +16,17 @@ use std;
 
 use std::path::{Path, PathBuf};
 
+use clap::{App, AppSettings, SubCommand, Arg};
+
 use super::debug_flags::*;
-use super::build::BuildConfig;
+use super::build::{BuildConfig, BuildConfigVerbosity};
 use super::build_log::{BuildLog, BuildLogUser};
 use super::deps_log::DepsLog;
-use super::utils::set_stdout_linebuffered;
+use super::utils::*;
 use super::state::State;
 use super::disk_interface::RealDiskInterface;
 use super::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction, PhonyCycleAction};
+use super::version::NINJA_VERSION;
 
 /// Command-line options.
 #[derive(Default)]
@@ -81,33 +84,18 @@ struct Tool<'a> {
 type NinjaMainToolFunc = fn (&NinjaMain, &Options) -> Result<(), isize>;
 
 struct NinjaMain<'a> {
+    /// Command line used to run Ninja.
     ninja_command: &'a Path,
+    /// Build configuration set from flags (e.g. parallelism).
     config: &'a BuildConfig,
+    /// Loaded state (rules, nodes).
     state: State,
+    /// Functions for accesssing the disk.
     disk_interface: RealDiskInterface,
+    /// The build directory, used for storing the build log etc.
     build_dir: String,
     build_log: BuildLog<'a>,
     deps_log: DepsLog,
-/*
-  /// Command line used to run Ninja.
-  const char* ninja_command_;
-
-  /// Build configuration set from flags (e.g. parallelism).
-  const BuildConfig& config_;
-
-  /// Loaded state (rules, nodes).
-  State state_;
-
-  /// Functions for accesssing the disk.
-  RealDiskInterface disk_interface_;
-
-  /// The build directory, used for storing the build log etc.
-  string build_dir_;
-
-  BuildLog build_log_;
-  DepsLog deps_log_;
-*/
-
 }
 
 impl<'a> NinjaMain<'a> {
@@ -224,8 +212,216 @@ struct NinjaMain : public BuildLogUser {
 };
 */
 
-fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<(), isize> {
+fn debug_enable(name: &str) -> Result<(), isize> {
     unimplemented!()
+}
+
+fn warning_enable(name: &str) -> Result<(), isize> {
+    unimplemented!()
+}
+
+fn choose_tool(subcommand: &[&str]) -> Result<Tool<'static>, isize> {
+    unimplemented!()
+}
+
+/*
+/// Enable a debugging mode.  Returns false if Ninja should exit instead
+/// of continuing.
+bool DebugEnable(const string& name) {
+  if (name == "list") {
+    printf("debugging modes:\n"
+"  stats        print operation counts/timing info\n"
+"  explain      explain what caused a command to execute\n"
+"  keepdepfile  don't delete depfiles after they're read by ninja\n"
+"  keeprsp      don't delete @response files on success\n"
+#ifdef _WIN32
+"  nostatcache  don't batch stat() calls per directory and cache them\n"
+#endif
+"multiple modes can be enabled via -d FOO -d BAR\n");
+    return false;
+  } else if (name == "stats") {
+    g_metrics = new Metrics;
+    return true;
+  } else if (name == "explain") {
+    g_explaining = true;
+    return true;
+  } else if (name == "keepdepfile") {
+    g_keep_depfile = true;
+    return true;
+  } else if (name == "keeprsp") {
+    g_keep_rsp = true;
+    return true;
+  } else if (name == "nostatcache") {
+    g_experimental_statcache = false;
+    return true;
+  } else {
+    const char* suggestion =
+        SpellcheckString(name.c_str(),
+                         "stats", "explain", "keepdepfile", "keeprsp",
+                         "nostatcache", NULL);
+    if (suggestion) {
+      Error("unknown debug setting '%s', did you mean '%s'?",
+            name.c_str(), suggestion);
+    } else {
+      Error("unknown debug setting '%s'", name.c_str());
+    }
+    return false;
+  }
+}
+
+/// Set a warning flag.  Returns false if Ninja should exit instead  of
+/// continuing.
+bool WarningEnable(const string& name, Options* options) {
+  if (name == "list") {
+    printf("warning flags:\n"
+"  dupbuild={err,warn}  multiple build lines for one target\n"
+"  phonycycle={err,warn}  phony build statement references itself\n");
+    return false;
+  } else if (name == "dupbuild=err") {
+    options->dupe_edges_should_err = true;
+    return true;
+  } else if (name == "dupbuild=warn") {
+    options->dupe_edges_should_err = false;
+    return true;
+  } else if (name == "phonycycle=err") {
+    options->phony_cycle_should_err = true;
+    return true;
+  } else if (name == "phonycycle=warn") {
+    options->phony_cycle_should_err = false;
+    return true;
+  } else {
+    const char* suggestion =
+        SpellcheckString(name.c_str(), "dupbuild=err", "dupbuild=warn",
+                         "phonycycle=err", "phonycycle=warn", NULL);
+    if (suggestion) {
+      Error("unknown warning flag '%s', did you mean '%s'?",
+            name.c_str(), suggestion);
+    } else {
+      Error("unknown warning flag '%s'", name.c_str());
+    }
+    return false;
+  }
+}
+*/
+
+/// Choose a default value for the -j (parallelism) flag.
+fn guess_parallelism() -> usize {
+    match get_processor_count() {
+        0 | 1 => 2,
+        2 => 3,
+        p => p + 2
+    }
+}
+
+/// Parse argv for command-line options.
+/// Returns an exit code, or -1 if Ninja should continue.
+fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<(), isize> {
+    let helpstring_version = format!("print ninja version (\"{}\")", NINJA_VERSION);
+    let guessed_parallelism = guess_parallelism();
+    let default_parallel_count = format!("{}", guessed_parallelism);
+    let helpstring_parallelism = format!("run N jobs in parallel [default={}, derived from CPUs available]", guessed_parallelism);
+    let app = App::new("ninja")
+        .version(NINJA_VERSION)
+        .setting(AppSettings::DisableHelpSubcommand)
+        .setting(AppSettings::DeriveDisplayOrder)
+        .setting(AppSettings::UnifiedHelpMessage)
+        .arg(Arg::with_name("cwd").short("C").takes_value(true).value_name("DIR")
+            .help("change to DIR before doing anything else"))
+        .arg(Arg::with_name("input_file").short("f").takes_value(true).value_name("FILE")
+            .default_value("build.ninja").help("specify input build file"))
+        .arg(Arg::with_name("parallelism").short("j").takes_value(true).value_name("N")
+            .default_value(&default_parallel_count).help(&helpstring_parallelism).hide_default_value(true))
+        .arg(Arg::with_name("failures_allowed").short("k").takes_value(true).value_name("N")
+            .default_value("1").help("keep going until N jobs fail"))
+        .arg(Arg::with_name("load_average_limit").short("l").takes_value(true).value_name("N")
+            .help("do not start new jobs if the load average is greater than N"))        
+        .arg(Arg::with_name("dry_run").short("n")
+            .help("dry run (don't run commands but act like they succeeded)"))        
+        .arg(Arg::with_name("verbose").short("v")
+            .help("show all command lines while building"))
+        .arg(Arg::with_name("debug_mode").short("d").takes_value(true).value_name("MODE")
+            .help("enable debugging (use -d list to list modes)"))
+        .arg(Arg::with_name("warning").short("w").takes_value(true).value_name("FLAG")
+            .help("adjust warnings (use -w list to list warnings)"))
+        .arg(Arg::with_name("targets").multiple(true).value_name("TARGETS")
+            .help("if targets are unspecified, builds the 'default' target (see manual)."))
+        .subcommand(SubCommand::with_name("-t")
+            .setting(AppSettings::TrailingVarArg)
+            .help("run a subtool (use -t list to list subtools)\nterminates toplevel options; further flags are passed to the tool")
+            .arg(Arg::with_name("tool").multiple(true).value_name("TOOL").required(true)
+                .help("tool and its arguments.")))
+        ;
+    let matches = app.get_matches();
+    if let Some(debug_mode) = matches.value_of("debug_mode") {
+        debug_enable(debug_mode)?;
+    }
+
+    if let Some(input_file) = matches.value_of_os("input_file") {
+        options.input_file = input_file.into();
+    }
+
+    if let Some(parallelism) = matches.value_of("parallelism") {
+        let parallelism = parallelism.parse::<isize>()
+            .map_err(|_| 1isize)
+            .and_then(|p| if p > 0 {Ok(p)} else {Err(1isize)})
+            .unwrap_or_else(|e| {
+                fatal!("invalid -j parameter");
+            });
+        config.parallelism = parallelism as _;
+    }
+
+    if let Some(failures_allowed) = matches.value_of("failures_allowed") {
+        // We want to go until N jobs fail, which means we should allow
+        // N failures and then stop.  For N <= 0, INT_MAX is close enough
+        // to infinite for most sane builds.        
+        let failures_allowed = failures_allowed.parse::<isize>()
+            .map(|v| if v > 0 { v } else { std::isize::MAX })
+            .unwrap_or_else(|e| {
+                fatal!("-k parameter not numeric; did you mean -k 0?");
+            });
+        config.failures_allowed = failures_allowed;
+    }
+
+    if let Some(load_average_limit) = matches.value_of("load_average_limit") {
+        // We want to go until N jobs fail, which means we should allow
+        // N failures and then stop.  For N <= 0, INT_MAX is close enough
+        // to infinite for most sane builds.        
+        let load_average_limit = load_average_limit.parse::<f64>()
+            .unwrap_or_else(|e| {
+                fatal!("-l parameter not numeric: did you mean -l 0.0?");
+            });
+        config.max_load_average = load_average_limit;
+    }
+
+    if matches.is_present("dry_run") {
+        config.dry_run = true;
+    }
+
+    if matches.is_present("verbose") {
+        config.verbosity = BuildConfigVerbosity::VERBOSE;
+    }
+
+    if let Some(warning) = matches.value_of("warning") {
+        warning_enable(warning)?;
+    }
+
+    if let Some(cwd) = matches.value_of_os("cwd") {
+        options.working_dir = Some(cwd.into());
+    }
+
+    if let Some(sub_matches) = matches.subcommand_matches("-t") {
+        let mut subcommand : Vec<&str> = Vec::new();
+        if let Some(args) = sub_matches.values_of("tool") {
+            subcommand = args.collect();
+        }
+        options.tool = Some(choose_tool(&subcommand).map_err(|_| 0isize)?);
+    } else {
+        let targets : Vec<&str> = 
+            matches.values_of("targets").map(|v| v.collect()).unwrap_or_default();
+        println!("{:?}", targets)
+    }
+
+    Ok(())
 }
 
 pub fn ninja_entry() -> Result<(), isize> {
@@ -248,7 +444,7 @@ pub fn ninja_entry() -> Result<(), isize> {
             print!("ninja: Entering directory `{:?}'\n", working_dir);
         }
 
-        std::env::set_current_dir(working_dir).or_else::<(), _>(|e| {
+        std::env::set_current_dir(working_dir).unwrap_or_else(|e| {
             fatal!("chdir to '{:?}' - {}", working_dir, e);
         });
     }
@@ -391,19 +587,6 @@ void Usage(const BuildConfig& config) {
 "    terminates toplevel options; further flags are passed to the tool\n"
 "  -w FLAG  adjust warnings (use -w list to list warnings)\n",
           kNinjaVersion, config.parallelism);
-}
-
-/// Choose a default value for the -j (parallelism) flag.
-int GuessParallelism() {
-  switch (int processors = GetProcessorCount()) {
-  case 0:
-  case 1:
-    return 2;
-  case 2:
-    return 3;
-  default:
-    return processors + 2;
-  }
 }
 
 /// Rebuild the build manifest, if necessary.
@@ -973,84 +1156,6 @@ const Tool* ChooseTool(const string& tool_name) {
   return NULL;  // Not reached.
 }
 
-/// Enable a debugging mode.  Returns false if Ninja should exit instead
-/// of continuing.
-bool DebugEnable(const string& name) {
-  if (name == "list") {
-    printf("debugging modes:\n"
-"  stats        print operation counts/timing info\n"
-"  explain      explain what caused a command to execute\n"
-"  keepdepfile  don't delete depfiles after they're read by ninja\n"
-"  keeprsp      don't delete @response files on success\n"
-#ifdef _WIN32
-"  nostatcache  don't batch stat() calls per directory and cache them\n"
-#endif
-"multiple modes can be enabled via -d FOO -d BAR\n");
-    return false;
-  } else if (name == "stats") {
-    g_metrics = new Metrics;
-    return true;
-  } else if (name == "explain") {
-    g_explaining = true;
-    return true;
-  } else if (name == "keepdepfile") {
-    g_keep_depfile = true;
-    return true;
-  } else if (name == "keeprsp") {
-    g_keep_rsp = true;
-    return true;
-  } else if (name == "nostatcache") {
-    g_experimental_statcache = false;
-    return true;
-  } else {
-    const char* suggestion =
-        SpellcheckString(name.c_str(),
-                         "stats", "explain", "keepdepfile", "keeprsp",
-                         "nostatcache", NULL);
-    if (suggestion) {
-      Error("unknown debug setting '%s', did you mean '%s'?",
-            name.c_str(), suggestion);
-    } else {
-      Error("unknown debug setting '%s'", name.c_str());
-    }
-    return false;
-  }
-}
-
-/// Set a warning flag.  Returns false if Ninja should exit instead  of
-/// continuing.
-bool WarningEnable(const string& name, Options* options) {
-  if (name == "list") {
-    printf("warning flags:\n"
-"  dupbuild={err,warn}  multiple build lines for one target\n"
-"  phonycycle={err,warn}  phony build statement references itself\n");
-    return false;
-  } else if (name == "dupbuild=err") {
-    options->dupe_edges_should_err = true;
-    return true;
-  } else if (name == "dupbuild=warn") {
-    options->dupe_edges_should_err = false;
-    return true;
-  } else if (name == "phonycycle=err") {
-    options->phony_cycle_should_err = true;
-    return true;
-  } else if (name == "phonycycle=warn") {
-    options->phony_cycle_should_err = false;
-    return true;
-  } else {
-    const char* suggestion =
-        SpellcheckString(name.c_str(), "dupbuild=err", "dupbuild=warn",
-                         "phonycycle=err", "phonycycle=warn", NULL);
-    if (suggestion) {
-      Error("unknown warning flag '%s', did you mean '%s'?",
-            name.c_str(), suggestion);
-    } else {
-      Error("unknown warning flag '%s'", name.c_str());
-    }
-    return false;
-  }
-}
-
 bool NinjaMain::OpenBuildLog(bool recompact_only) {
   string log_path = ".ninja_log";
   if (!build_dir_.empty())
@@ -1205,179 +1310,6 @@ int ExceptionFilter(unsigned int code, struct _EXCEPTION_POINTERS *ep) {
 }
 
 #endif  // _MSC_VER
-
-/// Parse argv for command-line options.
-/// Returns an exit code, or -1 if Ninja should continue.
-int ReadFlags(int* argc, char*** argv,
-              Options* options, BuildConfig* config) {
-  config->parallelism = GuessParallelism();
-
-  enum { OPT_VERSION = 1 };
-  const option kLongOptions[] = {
-    { "help", no_argument, NULL, 'h' },
-    { "version", no_argument, NULL, OPT_VERSION },
-    { NULL, 0, NULL, 0 }
-  };
-
-  int opt;
-  while (!options->tool &&
-         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vw:C:h", kLongOptions,
-                            NULL)) != -1) {
-    switch (opt) {
-      case 'd':
-        if (!DebugEnable(optarg))
-          return 1;
-        break;
-      case 'f':
-        options->input_file = optarg;
-        break;
-      case 'j': {
-        char* end;
-        int value = strtol(optarg, &end, 10);
-        if (*end != 0 || value <= 0)
-          Fatal("invalid -j parameter");
-        config->parallelism = value;
-        break;
-      }
-      case 'k': {
-        char* end;
-        int value = strtol(optarg, &end, 10);
-        if (*end != 0)
-          Fatal("-k parameter not numeric; did you mean -k 0?");
-
-        // We want to go until N jobs fail, which means we should allow
-        // N failures and then stop.  For N <= 0, INT_MAX is close enough
-        // to infinite for most sane builds.
-        config->failures_allowed = value > 0 ? value : INT_MAX;
-        break;
-      }
-      case 'l': {
-        char* end;
-        double value = strtod(optarg, &end);
-        if (end == optarg)
-          Fatal("-l parameter not numeric: did you mean -l 0.0?");
-        config->max_load_average = value;
-        break;
-      }
-      case 'n':
-        config->dry_run = true;
-        break;
-      case 't':
-        options->tool = ChooseTool(optarg);
-        if (!options->tool)
-          return 0;
-        break;
-      case 'v':
-        config->verbosity = BuildConfig::VERBOSE;
-        break;
-      case 'w':
-        if (!WarningEnable(optarg, options))
-          return 1;
-        break;
-      case 'C':
-        options->working_dir = optarg;
-        break;
-      case OPT_VERSION:
-        printf("%s\n", kNinjaVersion);
-        return 0;
-      case 'h':
-      default:
-        Usage(*config);
-        return 1;
-    }
-  }
-  *argv += optind;
-  *argc -= optind;
-
-  return -1;
-}
-
-int real_main(int argc, char** argv) {
-  BuildConfig config;
-  Options options = {};
-  options.input_file = "build.ninja";
-
-  setvbuf(stdout, NULL, _IOLBF, BUFSIZ);
-  const char* ninja_command = argv[0];
-
-  int exit_code = ReadFlags(&argc, &argv, &options, &config);
-  if (exit_code >= 0)
-    return exit_code;
-
-  if (options.working_dir) {
-    // The formatting of this string, complete with funny quotes, is
-    // so Emacs can properly identify that the cwd has changed for
-    // subsequent commands.
-    // Don't print this if a tool is being used, so that tool output
-    // can be piped into a file without this string showing up.
-    if (!options.tool)
-      printf("ninja: Entering directory `%s'\n", options.working_dir);
-    if (chdir(options.working_dir) < 0) {
-      Fatal("chdir to '%s' - %s", options.working_dir, strerror(errno));
-    }
-  }
-
-  if (options.tool && options.tool->when == Tool::RUN_AFTER_FLAGS) {
-    // None of the RUN_AFTER_FLAGS actually use a NinjaMain, but it's needed
-    // by other tools.
-    NinjaMain ninja(ninja_command, config);
-    return (ninja.*options.tool->func)(&options, argc, argv);
-  }
-
-  // Limit number of rebuilds, to prevent infinite loops.
-  const int kCycleLimit = 100;
-  for (int cycle = 1; cycle <= kCycleLimit; ++cycle) {
-    NinjaMain ninja(ninja_command, config);
-
-    ManifestParserOptions parser_opts;
-    if (options.dupe_edges_should_err) {
-      parser_opts.dupe_edge_action_ = kDupeEdgeActionError;
-    }
-    if (options.phony_cycle_should_err) {
-      parser_opts.phony_cycle_action_ = kPhonyCycleActionError;
-    }
-    ManifestParser parser(&ninja.state_, &ninja.disk_interface_, parser_opts);
-    string err;
-    if (!parser.Load(options.input_file, &err)) {
-      Error("%s", err.c_str());
-      return 1;
-    }
-
-    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
-      return (ninja.*options.tool->func)(&options, argc, argv);
-
-    if (!ninja.EnsureBuildDirExists())
-      return 1;
-
-    if (!ninja.OpenBuildLog() || !ninja.OpenDepsLog())
-      return 1;
-
-    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOGS)
-      return (ninja.*options.tool->func)(&options, argc, argv);
-
-    // Attempt to rebuild the manifest before building anything else
-    if (ninja.RebuildManifest(options.input_file, &err)) {
-      // In dry_run mode the regeneration will succeed without changing the
-      // manifest forever. Better to return immediately.
-      if (config.dry_run)
-        return 0;
-      // Start the build over with the new manifest.
-      continue;
-    } else if (!err.empty()) {
-      Error("rebuilding '%s': %s", options.input_file, err.c_str());
-      return 1;
-    }
-
-    int result = ninja.RunBuild(argc, argv);
-    if (g_metrics)
-      ninja.DumpMetrics();
-    return result;
-  }
-
-  Error("manifest '%s' still dirty after %d tries\n",
-      options.input_file, kCycleLimit);
-  return 1;
-}
 
 }  // anonymous namespace
 

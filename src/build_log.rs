@@ -1,3 +1,17 @@
+// Copyright 2011 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::timestamp::TimeStamp;
 use super::graph::Edge;
 
@@ -48,7 +62,7 @@ impl<'a> BuildLog<'a> {
     }
 
     pub fn close(&mut self) {
-        unimplemented!()
+        self.log_file = None;
     }
 
     /// Load the on-disk log.
@@ -73,12 +87,6 @@ impl<'a> BuildLog<'a> {
 
     pub fn entries(&'a self) -> &'a BuildLogEntries<'a> {
         &self.entries
-    }
-}
-
-impl<'a> Drop for BuildLog<'a> {
-    fn drop(&mut self) {
-        self.close();
     }
 }
 
@@ -111,20 +119,6 @@ type BuildLogEntries<'a> = HashMap<&'a str, &'a BuildLogEntry>;
 
 
 /*
-
-// Copyright 2011 Google Inc. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 // On AIX, inttypes.h gets indirectly included by build_log.h.
 // It's easiest just to ask for the printf format macros right away.
@@ -222,13 +216,6 @@ BuildLog::LogEntry::LogEntry(const string& output, uint64_t command_hash,
     start_time(start_time), end_time(end_time), mtime(restat_mtime)
 {}
 
-BuildLog::BuildLog()
-  : log_file_(NULL), needs_recompaction_(false) {}
-
-BuildLog::~BuildLog() {
-  Close();
-}
-
 bool BuildLog::OpenForWrite(const string& path, const BuildLogUser& user,
                             string* err) {
   if (needs_recompaction_) {
@@ -286,11 +273,6 @@ bool BuildLog::RecordCommand(Edge* edge, int start_time, int end_time,
   return true;
 }
 
-void BuildLog::Close() {
-  if (log_file_)
-    fclose(log_file_);
-  log_file_ = NULL;
-}
 
 struct LineReader {
   explicit LineReader(FILE* file)

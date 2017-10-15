@@ -7,6 +7,8 @@ extern crate kernel32;
 #[macro_use]
 extern crate clap;
 
+extern crate num_cpus;
+
 #[macro_use]
 mod utils;
 mod build;
@@ -31,7 +33,7 @@ extern "C" {
 }
 
 fn main() {
-    if true {
+    if false {
         let argv: Vec<CString> = std::env::args()
             .map(|arg| CString::new(arg).unwrap())
             .collect();

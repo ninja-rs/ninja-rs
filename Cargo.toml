@@ -9,6 +9,7 @@ libc = "0.2"
 errno = "0.2"
 murmurhash64 = "0.3"
 clap = "2"
+num_cpus = "1"
 
 [target."cfg(windows)".dependencies]
 winapi = "0.2"

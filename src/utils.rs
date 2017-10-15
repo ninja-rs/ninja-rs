@@ -3,6 +3,7 @@ use libc;
 use errno;
 #[cfg(windows)]
 use kernel32;
+use num_cpus;
 
 macro_rules! explain {
     ($fmt:expr) => 
@@ -88,6 +89,10 @@ pub fn set_stdout_linebuffered() {
     unsafe {
         libc::setvbuf(ninja_get_c_stdout(), std::ptr::null_mut(), libc::_IOLBF, libc::BUFSIZ as _);
     }
+}
+
+pub fn get_processor_count() -> usize {
+    num_cpus::get()
 }
 
 /*
@@ -599,15 +604,6 @@ string StripAnsiEscapeCodes(const string& in) {
   return stripped;
 }
 
-int GetProcessorCount() {
-#ifdef _WIN32
-  SYSTEM_INFO info;
-  GetNativeSystemInfo(&info);
-  return info.dwNumberOfProcessors;
-#else
-  return sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-}
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 static double CalculateProcessorLoad(uint64_t idle_ticks, uint64_t total_ticks)
