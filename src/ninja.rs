@@ -16,7 +16,7 @@ use std;
 
 use std::path::{Path, PathBuf};
 
-use clap::{App, AppSettings, SubCommand, Arg};
+use clap::{App, AppSettings, SubCommand, Arg, ArgMatches};
 
 use super::debug_flags::*;
 use super::build::{BuildConfig, BuildConfigVerbosity};
@@ -315,11 +315,13 @@ fn guess_parallelism() -> usize {
 
 /// Parse argv for command-line options.
 /// Returns an exit code, or -1 if Ninja should continue.
-fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<(), isize> {
-    let helpstring_version = format!("print ninja version (\"{}\")", NINJA_VERSION);
-    let guessed_parallelism = guess_parallelism();
-    let default_parallel_count = format!("{}", guessed_parallelism);
-    let helpstring_parallelism = format!("run N jobs in parallel [default={}, derived from CPUs available]", guessed_parallelism);
+fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatches<'static>, isize> {
+    // let helpstring_version = format!("print ninja version (\"{}\")", NINJA_VERSION);
+    lazy_static! {
+        static ref GUESSED_PARALLELISM : usize = guess_parallelism();
+        static ref DEFAULT_PARALLELISM : String = GUESSED_PARALLELISM.to_string();
+    }
+    let helpstring_parallelism = format!("run N jobs in parallel [default={}, derived from CPUs available]", &GUESSED_PARALLELISM as &usize);
     let app = App::new("ninja")
         .version(NINJA_VERSION)
         .setting(AppSettings::DisableHelpSubcommand)
@@ -330,7 +332,7 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<(), isi
         .arg(Arg::with_name("input_file").short("f").takes_value(true).value_name("FILE")
             .default_value("build.ninja").help("specify input build file"))
         .arg(Arg::with_name("parallelism").short("j").takes_value(true).value_name("N")
-            .default_value(&default_parallel_count).help(&helpstring_parallelism).hide_default_value(true))
+            .default_value(&DEFAULT_PARALLELISM).help(&helpstring_parallelism).hide_default_value(true))
         .arg(Arg::with_name("failures_allowed").short("k").takes_value(true).value_name("N")
             .default_value("1").help("keep going until N jobs fail"))
         .arg(Arg::with_name("load_average_limit").short("l").takes_value(true).value_name("N")
@@ -415,13 +417,9 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<(), isi
             subcommand = args.collect();
         }
         options.tool = Some(choose_tool(&subcommand).map_err(|_| 0isize)?);
-    } else {
-        let targets : Vec<&str> = 
-            matches.values_of("targets").map(|v| v.collect()).unwrap_or_default();
-        println!("{:?}", targets)
+        return Ok(sub_matches.clone())
     }
-
-    Ok(())
+    return Ok(matches);
 }
 
 pub fn ninja_entry() -> Result<(), isize> {
@@ -561,33 +559,6 @@ void CreateWin32MiniDump(_EXCEPTION_POINTERS* pep);
 #endif
 
 namespace {
-
-
-/// Print usage information.
-void Usage(const BuildConfig& config) {
-  fprintf(stderr,
-"usage: ninja [options] [targets...]\n"
-"\n"
-"if targets are unspecified, builds the 'default' target (see manual).\n"
-"\n"
-"options:\n"
-"  --version  print ninja version (\"%s\")\n"
-"\n"
-"  -C DIR   change to DIR before doing anything else\n"
-"  -f FILE  specify input build file [default=build.ninja]\n"
-"\n"
-"  -j N     run N jobs in parallel [default=%d, derived from CPUs available]\n"
-"  -k N     keep going until N jobs fail [default=1]\n"
-"  -l N     do not start new jobs if the load average is greater than N\n"
-"  -n       dry run (don't run commands but act like they succeeded)\n"
-"  -v       show all command lines while building\n"
-"\n"
-"  -d MODE  enable debugging (use -d list to list modes)\n"
-"  -t TOOL  run a subtool (use -t list to list subtools)\n"
-"    terminates toplevel options; further flags are passed to the tool\n"
-"  -w FLAG  adjust warnings (use -w list to list warnings)\n",
-          kNinjaVersion, config.parallelism);
-}
 
 /// Rebuild the build manifest, if necessary.
 /// Returns true if the manifest was rebuilt.

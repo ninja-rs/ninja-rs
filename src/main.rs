@@ -6,6 +6,10 @@ extern crate winapi;
 extern crate kernel32;
 #[macro_use]
 extern crate clap;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate nom;
 
 extern crate num_cpus;
 
@@ -19,6 +23,7 @@ mod timestamp;
 mod debug_flags;
 mod version;
 mod lexer;
+mod eval_env;
 mod manifest_parser;
 mod disk_interface;
 mod metrics;

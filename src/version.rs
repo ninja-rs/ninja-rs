@@ -1,5 +1,5 @@
 
-pub const NINJA_VERSION: &'static str = env!("CARGO_PKG_VERSION");
+pub const NINJA_VERSION: &'static str = crate_version!{};
 
 pub fn parse_version(version: &str) -> (u8, u8) {
     let mut split = version.split('.');
