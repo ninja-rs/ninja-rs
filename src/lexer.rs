@@ -358,12 +358,10 @@ impl<'a> Lexer<'a> {
                 map!(preceded!(tag!("$"), take_while1!(is_simple_varname_char)), TokenResult::Special) |
                 map!(preceded!(tag!("$"), tag!(":")), TokenResult::Text) |
                 value!(TokenResult::Error("bad $-escape (literal $ must be written as $$)"),
-                    peek!(preceded!(tag!("$"), take!(1)))) |
+                    peek!(preceded!(tag!("$"), alt_complete!(take!(1)|eof!())))) |
                 value!(TokenResult::Error("unexpected EOF"),
-                    peek!(char!('\0'))) |
-                value!(TokenResult::ErrorLastError,
-                    peek!(take!(1))) |
-                value!(TokenResult::Error("unexpected EOF"), eof!())));
+                    alt_complete!(peek!(tag!("\0"))|eof!())) |
+                value!(TokenResult::ErrorLastError, peek!(take!(1)))));
         
         loop {
             match read_evalstring_token(rest_input, path) {
