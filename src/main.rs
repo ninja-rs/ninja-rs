@@ -15,6 +15,8 @@ extern crate num_cpus;
 
 #[macro_use]
 mod utils;
+#[cfg(test)]
+mod test;
 mod build;
 mod graph;
 mod build_log;

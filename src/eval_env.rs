@@ -139,7 +139,7 @@ impl Rule {
 
 /// An Env which contains a mapping of variables to values
 /// as well as a pointer to a parent scope.
-struct BindingEnv<'a> {
+pub struct BindingEnv<'a> {
     bindings: HashMap<Vec<u8>, Vec<u8>>,
     rules: HashMap<Vec<u8>, &'a Rule>,
     parent: Option<&'a Env>

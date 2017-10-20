@@ -23,29 +23,21 @@ pub enum FileReaderError {
 /// Interface for reading files from disk.  See DiskInterface for details.
 /// This base offers the minimum interface needed just to read files.
 pub trait FileReader {
-  /// Read and store in given string.  On success, return Okay.
-  /// On error, return another Status and fill |err|.
-  fn read_file(path: &Path, contents: &str) -> Result<(), FileReaderError>;
+    /// Read and store in given string.  On success, return Okay.
+    /// On error, return another Status and fill |err|.
+    fn read_file(&self, path: &Path, contents: &mut [u8]) -> Result<(), FileReaderError>;
 }
-
-pub struct RealDiskInterface {}
-
-/*
-
-
-#ifndef NINJA_DISK_INTERFACE_H_
-#define NINJA_DISK_INTERFACE_H_
-
-#include <map>
-#include <string>
-using namespace std;
-
-#include "timestamp.h"
 
 /// Interface for accessing the disk.
 ///
 /// Abstract so it can be mocked out for tests.  The real implementation
 /// is RealDiskInterface.
+pub trait DiskInterface: FileReader {
+
+}
+
+/*
+
 struct DiskInterface: public FileReader {
   /// stat() a file, returning the mtime, or 0 if missing and -1 on
   /// other errors.
@@ -69,6 +61,14 @@ struct DiskInterface: public FileReader {
   /// `basename path`.
   bool MakeDirs(const string& path);
 };
+
+*/
+
+pub struct RealDiskInterface {}
+
+
+/*
+
 
 /// Implementation of DiskInterface that actually hits the disk.
 struct RealDiskInterface : public DiskInterface {
@@ -102,3 +102,13 @@ struct RealDiskInterface : public DiskInterface {
 
 #endif  // NINJA_DISK_INTERFACE_H_
 */
+
+impl FileReader for RealDiskInterface {
+    fn read_file(&self, path: &Path, contents: &mut [u8]) -> Result<(), FileReaderError> {
+        unimplemented!()
+    }
+}
+
+impl DiskInterface for RealDiskInterface {
+
+}

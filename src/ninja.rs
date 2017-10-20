@@ -89,7 +89,7 @@ struct NinjaMain<'a> {
     /// Build configuration set from flags (e.g. parallelism).
     config: &'a BuildConfig,
     /// Loaded state (rules, nodes).
-    state: State,
+    state: State<'a>,
     /// Functions for accesssing the disk.
     disk_interface: RealDiskInterface,
     /// The build directory, used for storing the build log etc.
@@ -103,7 +103,7 @@ impl<'a> NinjaMain<'a> {
         NinjaMain{
             ninja_command,
             config,
-            state: State{},
+            state: State::new(),
             disk_interface: RealDiskInterface{},
             build_dir: String::new(),
             build_log: BuildLog::new(),
@@ -464,12 +464,14 @@ pub fn ninja_entry() -> Result<(), isize> {
             parser_opts.phony_cycle_action = PhonyCycleAction::ERROR;
         }
 
-        let mut parser = ManifestParser::new(&ninja.state, &ninja.disk_interface, parser_opts);
-        parser.load(&options.input_file)
-            .map_err(|err| {
-                error!("{}", &err);
-                return 1isize;
-            })?;
+        {
+          let mut parser = ManifestParser::new(&ninja.state, &ninja.disk_interface, parser_opts);
+          parser.load(&options.input_file)
+              .map_err(|err| {
+                  error!("{}", &err);
+                  return 1isize;
+              })?;
+        }
         
         if Some(ToolRunAfter::RUN_AFTER_LOAD) == (options.tool.as_ref().map(|tool| tool.when)) {
             let tool_func = options.tool.as_ref().unwrap().func.clone();
