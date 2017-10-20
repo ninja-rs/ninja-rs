@@ -70,9 +70,9 @@ impl Token {
 }
 
 
-pub struct Lexer<'a> {
+pub struct Lexer<'a, 'b: 'a> {
     filename: &'a OsStr,
-    input: &'a [u8],
+    input: &'b [u8],
     last_token_offset: usize,
     offset: usize,
 }
@@ -117,7 +117,7 @@ fn is_sp_char(c: u8) -> bool {
     c == b' '
 }
 
-impl<'a> Lexer<'a> {
+impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
     pub fn new() -> Self {
         lazy_static! {
             static ref EMPTY_FILENAME: OsString = OsString::new();
@@ -132,7 +132,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Helper ctor useful for tests.
-    pub(crate) fn new_with_input(input: &'a [u8]) -> Self {
+    pub(crate) fn new_with_input(input: &'b [u8]) -> Self {
         lazy_static! {
             static ref FAKE_FILENAME: OsString = "input".into();
         }
@@ -152,7 +152,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Start parsing some input.
-    pub fn start(&mut self, filename: &'a OsStr, input: &'a [u8]) {
+    pub fn start(&mut self, filename: &'a OsStr, input: &'b [u8]) {
         self.filename = filename;
         self.input = input;
         self.offset = 0;
@@ -276,7 +276,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Construct an error message with context.
-    pub(self) fn error(&self, message: &str) -> String {
+    pub fn error(&self, message: &str) -> String {
         // Compute line/column.
         let context = &self.input[0..self.last_token_offset];
         let (last_line_idx, last_line_cnt) = context.split(|ch| ch == &b'\n').enumerate().last().unwrap();

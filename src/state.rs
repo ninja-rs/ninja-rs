@@ -12,27 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::eval_env::BindingEnv;
-use super::graph::Node;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
-/*
-
-#ifndef NINJA_STATE_H_
-#define NINJA_STATE_H_
-
-#include <map>
-#include <set>
-#include <string>
-#include <vector>
-using namespace std;
-
-#include "eval_env.h"
-#include "hash_map.h"
-#include "util.h"
-
-struct Edge;
-struct Node;
-struct Rule;
+use super::eval_env::{BindingEnv, Rule};
+use super::graph::{Edge, Node};
 
 /// A pool for delayed edges.
 /// Pools are scoped to a State. Edges within a State will share Pools. A Pool
@@ -42,6 +27,12 @@ struct Rule;
 /// allowing the Plan to schedule it. The Pool will relinquish queued Edges when
 /// the total scheduled weight diminishes enough (i.e. when a scheduled edge
 /// completes).
+struct Pool {
+
+}
+
+/*
+
 struct Pool {
   Pool(const string& name, int depth)
     : name_(name), current_use_(0), depth_(depth), delayed_(&WeightedEdgeCmp) {}
@@ -138,14 +129,26 @@ struct State {
 
 /// Global state (file status) for a single run.
 pub struct State<'a> {
-    pub bindings: BindingEnv<'a>,
+    /// Mapping of path -> Node.
+    paths: HashMap<String, &'a Node>,
+    
+    /// All the pools used in the graph.
+    pools: HashMap<String, &'a Pool>,
+
+    /// All the edges of the graph.
+    edges: Vec<&'a Edge>,
+
+    pub bindings: Rc<RefCell<BindingEnv<'a>>>,
     defaults: Vec<&'a Node>,
 }
 
 impl<'a> State<'a> {
     pub fn new() -> Self {
         State {
-            bindings: BindingEnv::new(),
+            paths: HashMap::new(),
+            pools: HashMap::new(),
+            edges: Vec::new(),
+            bindings: Rc::new(RefCell::new(BindingEnv::new())),
             defaults: Vec::new()
         }
     }

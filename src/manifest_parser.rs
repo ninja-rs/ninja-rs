@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::rc::Rc;
+use std::cell::RefCell;
 use std::path::Path;
+use std::ffi::{OsString, OsStr};
 
 use super::lexer::Lexer;
+use super::lexer::Token as LexerToken;
 use super::state::State;
-use super::eval_env::BindingEnv;
+use super::eval_env::{BindingEnv, EvalString};
 use super::disk_interface::FileReader;
+use super::version::check_ninja_version;
 
 pub enum DupeEdgeAction {
     WARN,
@@ -50,20 +55,20 @@ impl Default for ManifestParserOptions {
 }
 
 /// Parses .ninja files.
-pub struct ManifestParser<'a> {
-    state: &'a State<'a>,
-    env:   &'a BindingEnv<'a>,
+pub struct ManifestParser<'a, 'b : 'a, 'c : 'a> {
+    state: &'a State<'b>,
+    env:   Rc<RefCell<BindingEnv<'b>>>,
     file_reader: &'a FileReader,
-    lexer: Lexer<'a>,
+    lexer: Lexer<'a, 'c>,
     options: ManifestParserOptions,
     quiet: bool
 }
 
-impl<'a> ManifestParser<'a> {
-    pub fn new(state: &'a State, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
+impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
+    pub fn new(state: &'a State<'b>, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
         ManifestParser {
             state,
-            env: &state.bindings,
+            env: state.bindings.clone(),
             file_reader,
             options,
             lexer: Lexer::new(),
@@ -82,109 +87,101 @@ impl<'a> ManifestParser<'a> {
 
     /// Parse a text string of input.  Used by tests.
     #[cfg(test)]
-    pub(crate) fn parse_test(&mut self, input: &[u8]) -> Result<(), String> {
-        unimplemented!{}
-        /*
+    pub(crate) fn parse_test(&mut self, input: &'c [u8]) -> Result<(), String> {
+        lazy_static! {
+            static ref FAKE_FILENAME : OsString = OsString::from("input");
+        }
         self.quiet = true;
-        return self.parse("input", input);
-        */
+        self.parse(&FAKE_FILENAME, input)
     }
+
+    /// Parse a file, given its contents as a string.
+    pub fn parse(&mut self, filename: &'a OsStr, input: &'c [u8]) -> Result<(), String> {
+        self.lexer.start(filename, input);
+        loop {
+            let token = self.lexer.read_token();
+            match token {
+              LexerToken::POOL => {
+                  self.parse_pool()?;
+              },
+              LexerToken::BUILD => {
+                  self.parse_edge()?;
+              },
+              LexerToken::RULE => {
+                  self.parse_rule()?;
+              },
+              LexerToken::DEFAULT => {
+                  self.parse_default()?;
+              },
+              LexerToken::IDENT => {
+                  self.lexer.unread_token();
+                  let (name, let_value) = self.parse_let()?;
+                  let value = let_value.evaluate(&self.env.borrow() as &BindingEnv);
+                  // Check ninja_required_version immediately so we can exit
+                  // before encountering any syntactic surprises.
+                  if &name == b"ninja_required_version" {
+                      check_ninja_version(String::from_utf8_lossy(&value).as_ref());
+                  }
+                  self.env.borrow_mut().add_binding(&name, &value);
+              },
+              LexerToken::INCLUDE => {
+                  self.parse_file_include(false)?;
+              },
+              LexerToken::SUBNINJA => {
+                  self.parse_file_include(true)?;
+              },
+              LexerToken::ERROR => {
+                  return Err(self.lexer.error(self.lexer.describe_last_error()));
+              },
+              LexerToken::TEOF => {
+                  return Ok(());
+              },
+              LexerToken::NEWLINE => {
+                  ()
+              },
+              _ => {
+                  return Err(self.lexer.error(&format!("unexpected {}", token.name())));
+              }
+            }
+        }
+        unreachable!()
+    }
+
+    /// Parse various statement types.
+    fn parse_pool(&mut self) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    fn parse_rule(&mut self) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    fn parse_let(&mut self) -> Result<(Vec<u8>, EvalString), String> {
+        unimplemented!()
+    }
+
+    fn parse_edge(&mut self) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    fn parse_default(&mut self) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    /// Parse either a 'subninja' or 'include' line.
+    fn parse_file_include(&mut self, new_scope: bool) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    /// If the next token is not \a expected, produce an error string
+    /// saying "expectd foo, got bar".
+    fn expect_token(&mut self, expected: LexerToken) -> Result<(), String> {
+        unimplemented!()
+    }
+
 }
 
-
 /*
-
-
-#ifndef NINJA_MANIFEST_PARSER_H_
-#define NINJA_MANIFEST_PARSER_H_
-
-#include <string>
-
-using namespace std;
-
-#include "lexer.h"
-
-struct BindingEnv;
-struct EvalString;
-struct FileReader;
-struct State;
-
-struct ManifestParser {
-  ManifestParser(State* state, FileReader* file_reader,
-                 ManifestParserOptions options = ManifestParserOptions());
-
-  /// Load and parse a file.
-  bool Load(const string& filename, string* err, Lexer* parent = NULL);
-
-  /// Parse a text string of input.  Used by tests.
-  bool ParseTest(const string& input, string* err) {
-    quiet_ = true;
-    return Parse("input", input, err);
-  }
-
-private:
-  /// Parse a file, given its contents as a string.
-  bool Parse(const string& filename, const string& input, string* err);
-
-  /// Parse various statement types.
-  bool ParsePool(string* err);
-  bool ParseRule(string* err);
-  bool ParseLet(string* key, EvalString* val, string* err);
-  bool ParseEdge(string* err);
-  bool ParseDefault(string* err);
-
-  /// Parse either a 'subninja' or 'include' line.
-  bool ParseFileInclude(bool new_scope, string* err);
-
-  /// If the next token is not \a expected, produce an error string
-  /// saying "expectd foo, got bar".
-  bool ExpectToken(Lexer::Token expected, string* err);
-
-  State* state_;
-  BindingEnv* env_;
-  FileReader* file_reader_;
-  Lexer lexer_;
-  ManifestParserOptions options_;
-  bool quiet_;
-};
-
-#endif  // NINJA_MANIFEST_PARSER_H_
-*/
-
-/*
-// Copyright 2011 Google Inc. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#include "manifest_parser.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <vector>
-
-#include "disk_interface.h"
-#include "graph.h"
-#include "metrics.h"
-#include "state.h"
-#include "util.h"
-#include "version.h"
-
-ManifestParser::ManifestParser(State* state, FileReader* file_reader,
-                               ManifestParserOptions options)
-    : state_(state), file_reader_(file_reader),
-      options_(options), quiet_(false) {
-  env_ = &state->bindings_;
-}
 
 bool ManifestParser::Load(const string& filename, string* err, Lexer* parent) {
   METRIC_RECORD(".ninja parse");
@@ -205,66 +202,6 @@ bool ManifestParser::Load(const string& filename, string* err, Lexer* parent) {
   contents.resize(contents.size() + 1);
 
   return Parse(filename, contents, err);
-}
-
-bool ManifestParser::Parse(const string& filename, const string& input,
-                           string* err) {
-  lexer_.Start(filename, input);
-
-  for (;;) {
-    Lexer::Token token = lexer_.ReadToken();
-    switch (token) {
-    case Lexer::POOL:
-      if (!ParsePool(err))
-        return false;
-      break;
-    case Lexer::BUILD:
-      if (!ParseEdge(err))
-        return false;
-      break;
-    case Lexer::RULE:
-      if (!ParseRule(err))
-        return false;
-      break;
-    case Lexer::DEFAULT:
-      if (!ParseDefault(err))
-        return false;
-      break;
-    case Lexer::IDENT: {
-      lexer_.UnreadToken();
-      string name;
-      EvalString let_value;
-      if (!ParseLet(&name, &let_value, err))
-        return false;
-      string value = let_value.Evaluate(env_);
-      // Check ninja_required_version immediately so we can exit
-      // before encountering any syntactic surprises.
-      if (name == "ninja_required_version")
-        CheckNinjaVersion(value);
-      env_->AddBinding(name, value);
-      break;
-    }
-    case Lexer::INCLUDE:
-      if (!ParseFileInclude(false, err))
-        return false;
-      break;
-    case Lexer::SUBNINJA:
-      if (!ParseFileInclude(true, err))
-        return false;
-      break;
-    case Lexer::ERROR: {
-      return lexer_.Error(lexer_.DescribeLastError(), err);
-    }
-    case Lexer::TEOF:
-      return true;
-    case Lexer::NEWLINE:
-      break;
-    default:
-      return lexer_.Error(string("unexpected ") + Lexer::TokenName(token),
-                          err);
-    }
-  }
-  return false;  // not reached
 }
 
 
@@ -609,12 +546,12 @@ mod parser_test {
     use super::super::state::State;
     use super::super::test::VirtualFileSystem;
 
-    struct ParserTest {
-        pub state: State<'static>,
+    struct ParserTest<'a> {
+        pub state: State<'a>,
         pub fs: VirtualFileSystem,
     }
 
-    impl ParserTest {
+    impl<'a> ParserTest<'a> {
         pub fn new() -> Self {
             ParserTest {
                 state: State::new(),
@@ -622,9 +559,11 @@ mod parser_test {
             }
         }
 
-        pub fn assert_parse(&self, input: &[u8]) -> () {
-            let mut parser = ManifestParser::new(&self.state, &self.fs, Default::default());
-            assert_eq!(Ok(()), parser.parse_test(input));
+        pub fn assert_parse(&'a self, input: &[u8]) -> () {
+            {
+              let mut parser = ManifestParser::new(&self.state, &self.fs, Default::default());
+              assert_eq!(Ok(()), parser.parse_test(input));
+            }
             assert_eq!((), self.state.verify_graph());
         }
     }
@@ -647,8 +586,9 @@ mod parser_test {
           "\n",
           "build result: cat in_1.cc in-2.O\n"
           ).as_bytes());
-        assert_eq!(3usize, parsertest.state.bindings.get_rules().len());
-        let rule = parsertest.state.bindings.get_rules().iter().next().unwrap().1;
+        assert_eq!(3usize, parsertest.state.bindings.borrow().get_rules().len());
+        let bindings = parsertest.state.bindings.borrow();
+        let rule = bindings.get_rules().iter().next().unwrap().1;
         assert_eq!(b"cat", rule.name());
         assert_eq!(b"[cat ][$in][ > ][$out]".as_ref().to_owned(), 
             rule.get_binding(b"command").unwrap().serialize());
