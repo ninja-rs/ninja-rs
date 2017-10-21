@@ -20,7 +20,7 @@ use std::ffi::{OsString, OsStr};
 use super::lexer::Lexer;
 use super::lexer::Token as LexerToken;
 use super::state::State;
-use super::eval_env::{BindingEnv, EvalString};
+use super::eval_env::{BindingEnv, EvalString, Rule};
 use super::disk_interface::FileReader;
 use super::version::check_ninja_version;
 
@@ -144,7 +144,6 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
               }
             }
         }
-        unreachable!()
     }
 
     /// Parse various statement types.
@@ -153,11 +152,43 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
     }
 
     fn parse_rule(&mut self) -> Result<(), String> {
-        unimplemented!()
+        let name = self.lexer.read_ident("expected rule name")?.to_owned();
+
+        self.expect_token(LexerToken::NEWLINE)?;
+
+        if self.env.borrow().lookup_rule_current_scope(&name).is_some() {
+            return Err(self.lexer.error(&format!("duplicate rule '{}'", String::from_utf8_lossy(&name))))
+        }
+        let mut rule = Rule::new(name);
+        while self.lexer.peek_token(LexerToken::INDENT) {
+            let (key, value) = self.parse_let()?;
+            if Rule::is_reserved_binding(&key) {
+                rule.add_binding(&key, &value);
+            } else {
+                // Die on other keyvals for now; revisit if we want to add a
+                // scope here.
+                return Err(self.lexer.error(&format!("unexpected variable '{}'", String::from_utf8_lossy(&key))));
+            }
+        }
+        if rule.bindings.get(b"rspfile".as_ref()).is_none() !=
+            rule.bindings.get(b"rspfile_content".as_ref()).is_none() {
+            return Err(self.lexer.error("rspfile and rspfile_content need to be both specified")); 
+        }
+
+        if rule.bindings.get(b"command".as_ref()).is_none() {
+            return Err(self.lexer.error("expected 'command =' line"));
+        }
+
+        self.env.borrow_mut().add_rule(rule);
+        return Ok(());
     }
 
     fn parse_let(&mut self) -> Result<(Vec<u8>, EvalString), String> {
-        unimplemented!()
+        let key = self.lexer.read_ident("expected variable name")?.to_owned();
+        self.expect_token(LexerToken::EQUALS)?;
+        let mut value = EvalString::new();
+        self.lexer.read_var_value(&mut value)?;
+        Ok((key, value))
     }
 
     fn parse_edge(&mut self) -> Result<(), String> {
@@ -176,7 +207,13 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
     /// If the next token is not \a expected, produce an error string
     /// saying "expectd foo, got bar".
     fn expect_token(&mut self, expected: LexerToken) -> Result<(), String> {
-        unimplemented!()
+        let token = self.lexer.read_token();
+        if token == expected {
+            Ok(())
+        } else {
+            let message = format!("expected {}, got {}{}", expected.name(), token.name(), expected.error_hint());
+            Err(self.lexer.error(&message))
+        }
     }
 
 }
@@ -242,56 +279,6 @@ bool ManifestParser::ParsePool(string* err) {
 }
 
 
-bool ManifestParser::ParseRule(string* err) {
-  string name;
-  if (!lexer_.ReadIdent(&name))
-    return lexer_.Error("expected rule name", err);
-
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  if (env_->LookupRuleCurrentScope(name) != NULL)
-    return lexer_.Error("duplicate rule '" + name + "'", err);
-
-  Rule* rule = new Rule(name);  // XXX scoped_ptr
-
-  while (lexer_.PeekToken(Lexer::INDENT)) {
-    string key;
-    EvalString value;
-    if (!ParseLet(&key, &value, err))
-      return false;
-
-    if (Rule::IsReservedBinding(key)) {
-      rule->AddBinding(key, value);
-    } else {
-      // Die on other keyvals for now; revisit if we want to add a
-      // scope here.
-      return lexer_.Error("unexpected variable '" + key + "'", err);
-    }
-  }
-
-  if (rule->bindings_["rspfile"].empty() !=
-      rule->bindings_["rspfile_content"].empty()) {
-    return lexer_.Error("rspfile and rspfile_content need to be "
-                        "both specified", err);
-  }
-
-  if (rule->bindings_["command"].empty())
-    return lexer_.Error("expected 'command =' line", err);
-
-  env_->AddRule(rule);
-  return true;
-}
-
-bool ManifestParser::ParseLet(string* key, EvalString* value, string* err) {
-  if (!lexer_.ReadIdent(key))
-    return lexer_.Error("expected variable name", err);
-  if (!ExpectToken(Lexer::EQUALS, err))
-    return false;
-  if (!lexer_.ReadVarValue(value, err))
-    return false;
-  return true;
-}
 
 bool ManifestParser::ParseDefault(string* err) {
   EvalString eval;
@@ -525,18 +512,6 @@ bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
 
   return true;
 }
-
-bool ManifestParser::ExpectToken(Lexer::Token expected, string* err) {
-  Lexer::Token token = lexer_.ReadToken();
-  if (token != expected) {
-    string message = string("expected ") + Lexer::TokenName(expected);
-    message += string(", got ") + Lexer::TokenName(token);
-    message += Lexer::TokenErrorHint(expected);
-    return lexer_.Error(message, err);
-  }
-  return true;
-}
-
 
 */
 

@@ -104,9 +104,9 @@ pub struct Rule {
 }
 
 impl Rule {
-    pub fn new(name: &[u8]) -> Self {
+    pub fn new(name: Vec<u8>) -> Self {
         Rule {
-            name: name.to_owned(),
+            name,
             bindings: RuleBindings::new(),
         }
     }
@@ -141,7 +141,7 @@ impl Rule {
 /// as well as a pointer to a parent scope.
 pub struct BindingEnv<'a> {
     bindings: HashMap<Vec<u8>, Vec<u8>>,
-    rules: HashMap<Vec<u8>, &'a Rule>,
+    rules: HashMap<Vec<u8>, Rule>,
     parent: Option<&'a Env>
 }
 
@@ -174,12 +174,12 @@ impl<'a> BindingEnv<'a> {
         return None;
     }
 
-    pub fn add_rule(&mut self, rule: &'a Rule) {
+    pub fn add_rule(&mut self, rule: Rule) {
         debug_assert!(self.lookup_rule_current_scope(rule.name()).is_none());
         self.rules.insert(rule.name().to_owned(), rule);
     }
 
-    pub fn get_rules(&self) -> &HashMap<Vec<u8>, &'a Rule> {
+    pub fn get_rules(&self) -> &HashMap<Vec<u8>, Rule> {
         return &self.rules;
     }
 

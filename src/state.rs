@@ -14,7 +14,7 @@
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::eval_env::{BindingEnv, Rule};
 use super::graph::{Edge, Node};
@@ -130,7 +130,7 @@ struct State {
 /// Global state (file status) for a single run.
 pub struct State<'a> {
     /// Mapping of path -> Node.
-    paths: HashMap<String, &'a Node>,
+    paths: HashMap<String, &'a Node<'a>>,
     
     /// All the pools used in the graph.
     pools: HashMap<String, &'a Pool>,
@@ -139,7 +139,7 @@ pub struct State<'a> {
     edges: Vec<&'a Edge>,
 
     pub bindings: Rc<RefCell<BindingEnv<'a>>>,
-    defaults: Vec<&'a Node>,
+    defaults: Vec<&'a Node<'a>>,
 }
 
 impl<'a> State<'a> {
@@ -157,7 +157,37 @@ impl<'a> State<'a> {
 #[cfg(test)]
 impl<'a> State<'a> {
     pub fn verify_graph(&self) {
-        unimplemented!()
+        for e in self.edges.iter() {
+            /*
+            // All edges need at least one output.
+            EXPECT_FALSE((*e)->outputs_.empty());
+            // Check that the edge's inputs have the edge as out-edge.
+            for (vector<Node*>::const_iterator in_node = (*e)->inputs_.begin();
+                in_node != (*e)->inputs_.end(); ++in_node) {
+            const vector<Edge*>& out_edges = (*in_node)->out_edges();
+            EXPECT_NE(find(out_edges.begin(), out_edges.end(), *e),
+                        out_edges.end());
+            }
+            // Check that the edge's outputs have the edge as in-edge.
+            for (vector<Node*>::const_iterator out_node = (*e)->outputs_.begin();
+                out_node != (*e)->outputs_.end(); ++out_node) {
+            EXPECT_EQ((*out_node)->in_edge(), *e);
+            }
+            */
+            unimplemented!()
+        }
+
+        // The union of all in- and out-edges of each nodes should be exactly edges_.
+        let mut node_edge_set = HashSet::new();
+        for p in self.paths.iter() {
+            let n = p.1;
+            if let Some(in_edge) = n.in_edge() {
+                node_edge_set.insert(in_edge as * const _);
+            }
+            node_edge_set.extend(n.out_edges().iter().map(|&r| r as * const _));
+        }
+        let edge_set = self.edges.iter().map(|&r| r as * const _).collect::<HashSet<_>>();
+        assert_eq!(node_edge_set, edge_set);
     }
 }
 
@@ -165,20 +195,7 @@ impl<'a> State<'a> {
 void VerifyGraph(const State& state) {
   for (vector<Edge*>::const_iterator e = state.edges_.begin();
        e != state.edges_.end(); ++e) {
-    // All edges need at least one output.
-    EXPECT_FALSE((*e)->outputs_.empty());
-    // Check that the edge's inputs have the edge as out-edge.
-    for (vector<Node*>::const_iterator in_node = (*e)->inputs_.begin();
-         in_node != (*e)->inputs_.end(); ++in_node) {
-      const vector<Edge*>& out_edges = (*in_node)->out_edges();
-      EXPECT_NE(find(out_edges.begin(), out_edges.end(), *e),
-                out_edges.end());
-    }
-    // Check that the edge's outputs have the edge as in-edge.
-    for (vector<Node*>::const_iterator out_node = (*e)->outputs_.begin();
-         out_node != (*e)->outputs_.end(); ++out_node) {
-      EXPECT_EQ((*out_node)->in_edge(), *e);
-    }
+    
   }
 
   // The union of all in- and out-edges of each nodes should be exactly edges_.

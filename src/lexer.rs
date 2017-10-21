@@ -244,7 +244,7 @@ impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
 
     /// Read a simple identifier (a rule or variable name).
     /// Returns false if a name can't be read.
-    pub fn read_ident(&mut self) -> Option<&[u8]> {
+    pub fn read_ident(&mut self, message: &str) -> Result<&[u8], String> {
         let mut rest_input = &self.input[self.offset..];
         named!(read_ident_token,
             take_while1!(is_varname_char));
@@ -253,12 +253,12 @@ impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
                 (i, v)
             },
             _ => {
-                return None;
+                return Err(self.error(message));
             }
         };
         self.offset = self.input.offset(i);
         self.eat_whitespace();
-        return Some(v);
+        return Ok(v);
     }
 
     /// Read a path (complete with $escapes).
@@ -427,13 +427,13 @@ fn test_lexer_read_evalstring_escapes() {
 }
 
 #[test]
-fn test_lexer_read_indent() {
+fn test_lexer_read_ident() {
     let mut lexer = Lexer::new_with_input(b"foo baR baz_123 foo-bar");
 
-    assert_eq!(Some(b"foo".as_ref()), lexer.read_ident());
-    assert_eq!(Some(b"baR".as_ref()), lexer.read_ident());
-    assert_eq!(Some(b"baz_123".as_ref()), lexer.read_ident());
-    assert_eq!(Some(b"foo-bar".as_ref()), lexer.read_ident());
+    assert_eq!(Ok(b"foo".as_ref()), lexer.read_ident("read_ident"));
+    assert_eq!(Ok(b"baR".as_ref()), lexer.read_ident("read_ident"));
+    assert_eq!(Ok(b"baz_123".as_ref()), lexer.read_ident("read_ident"));
+    assert_eq!(Ok(b"foo-bar".as_ref()), lexer.read_ident("read_ident"));
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn test_lexer_read_ident_curlies() {
     // Verify that ReadIdent includes dots in the name,
     // but in an expansion $bar.dots stops at the dot.
     let mut lexer = Lexer::new_with_input(b"foo.dots $bar.dots ${bar.dots}\n");
-    assert_eq!(Some(b"foo.dots".as_ref()), lexer.read_ident());
+    assert_eq!(Ok(b"foo.dots".as_ref()), lexer.read_ident("read_ident"));
 
     let mut eval = EvalString::new();
     assert_eq!(Ok(()), lexer.read_var_value(&mut eval));

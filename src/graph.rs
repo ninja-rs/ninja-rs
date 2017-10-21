@@ -1,4 +1,3 @@
-/*
 // Copyright 2011 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/*
 #ifndef NINJA_GRAPH_H_
 #define NINJA_GRAPH_H_
 
@@ -87,15 +87,6 @@ struct Node {
   void set_dirty(bool dirty) { dirty_ = dirty; }
   void MarkDirty() { dirty_ = true; }
 
-  Edge* in_edge() const { return in_edge_; }
-  void set_in_edge(Edge* edge) { in_edge_ = edge; }
-
-  int id() const { return id_; }
-  void set_id(int id) { id_ = id; }
-
-  const vector<Edge*>& out_edges() const { return out_edges_; }
-  void AddOutEdge(Edge* edge) { out_edges_.push_back(edge); }
-
   void Dump(const char* prefix="") const;
 
 private:
@@ -116,16 +107,52 @@ private:
   /// edges to build.
   bool dirty_;
 
-  /// The Edge that produces this Node, or NULL when there is no
-  /// known edge to produce it.
-  Edge* in_edge_;
 
-  /// All Edges that use this Node as an input.
-  vector<Edge*> out_edges_;
-
-  /// A dense integer id for the node, assigned and used by DepsLog.
-  int id_;
 };
+*/
+
+
+pub struct Node<'a> {
+
+    /// The Edge that produces this Node, or NULL when there is no
+    /// known edge to produce it.
+    in_edge: Option<&'a Edge>,
+
+    /// All Edges that use this Node as an input.
+    out_edges: Vec<&'a Edge>,
+
+    /// A dense integer id for the node, assigned and used by DepsLog.
+    id: isize,
+}
+
+impl<'a> Node<'a> {
+    pub fn in_edge(&self) -> Option<&'a Edge> {
+        self.in_edge
+    }
+
+    pub fn set_in_edge(&mut self, edge: Option<&'a Edge>) {
+        self.in_edge = edge;
+    }
+
+    pub fn id(&self) -> isize {
+        self.id
+    }
+
+    pub fn set_id(&mut self, id: isize) {
+        self.id = id;
+    }
+
+    pub fn out_edges(&self) -> &[&'a Edge] {
+        &self.out_edges
+    }
+
+    pub fn add_out_edge(&mut self, edge: &'a Edge) {
+        self.out_edges.push(edge);
+    }
+}
+
+
+/*
 
 /// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
@@ -297,10 +324,6 @@ struct DependencyScan {
 */
 
 pub struct Edge {
-
-}
-
-pub struct Node {
 
 }
 
