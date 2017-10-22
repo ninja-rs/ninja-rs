@@ -152,9 +152,18 @@ impl<'a> Node<'a> {
 }
 
 
+/// An edge in the dependency graph; links between Nodes using Rules.
+pub struct Edge {
+
+}
+
+impl Edge {
+    pub fn weight(&self) -> isize { return 1; }
+    
+}
+
 /*
 
-/// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
   enum VisitMark {
     VisitNone,
@@ -323,9 +332,6 @@ struct DependencyScan {
 
 */
 
-pub struct Edge {
-
-}
 
 struct DependencyScan {
 }

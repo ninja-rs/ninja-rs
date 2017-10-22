@@ -465,7 +465,7 @@ pub fn ninja_entry() -> Result<(), isize> {
         }
 
         {
-          let mut parser = ManifestParser::new(&ninja.state, &ninja.disk_interface, parser_opts);
+          let mut parser = ManifestParser::new(&mut ninja.state, &ninja.disk_interface, parser_opts);
           parser.load(&options.input_file)
               .map_err(|err| {
                   error!("{}", &err);

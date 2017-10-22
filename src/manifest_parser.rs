@@ -19,8 +19,8 @@ use std::ffi::{OsString, OsStr};
 
 use super::lexer::Lexer;
 use super::lexer::Token as LexerToken;
-use super::state::State;
-use super::eval_env::{BindingEnv, EvalString, Rule};
+use super::state::{State, Pool};
+use super::eval_env::{Env, BindingEnv, EvalString, Rule};
 use super::disk_interface::FileReader;
 use super::version::check_ninja_version;
 
@@ -56,7 +56,7 @@ impl Default for ManifestParserOptions {
 
 /// Parses .ninja files.
 pub struct ManifestParser<'a, 'b : 'a, 'c : 'a> {
-    state: &'a State<'b>,
+    state: &'a mut State<'b>,
     env:   Rc<RefCell<BindingEnv<'b>>>,
     file_reader: &'a FileReader,
     lexer: Lexer<'a, 'c>,
@@ -65,10 +65,11 @@ pub struct ManifestParser<'a, 'b : 'a, 'c : 'a> {
 }
 
 impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
-    pub fn new(state: &'a State<'b>, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
+    pub fn new(state: &'a mut State<'b>, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
+        let env = state.clone_bindings();
         ManifestParser {
             state,
-            env: state.bindings.clone(),
+            env: env,
             file_reader,
             options,
             lexer: Lexer::new(),
@@ -82,6 +83,26 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
     }
 
     pub fn load_with_parent(&mut self, filename: &Path, parent: Option<&Lexer>) -> Result<(), String> {
+/*
+  METRIC_RECORD(".ninja parse");
+  string contents;
+  string read_err;
+  if (file_reader_->ReadFile(filename, &contents, &read_err) != FileReader::Okay) {
+    *err = "loading '" + filename + "': " + read_err;
+    if (parent)
+      parent->Error(string(*err), err);
+    return false;
+  }
+
+  // The lexer needs a nul byte at the end of its input, to know when it's done.
+  // It takes a StringPiece, and StringPiece's string constructor uses
+  // string::data().  data()'s return value isn't guaranteed to be
+  // null-terminated (although in practice - libc++, libstdc++, msvc's stl --
+  // it is, and C++11 demands that too), so add an explicit nul byte.
+  contents.resize(contents.size() + 1);
+
+  return Parse(filename, contents, err);
+*/
         unimplemented!{}
     }
 
@@ -148,7 +169,33 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
 
     /// Parse various statement types.
     fn parse_pool(&mut self) -> Result<(), String> {
-        unimplemented!()
+        let name = self.lexer.read_ident("expected pool name")?.to_owned();
+        self.expect_token(LexerToken::NEWLINE)?;
+        if self.state.lookup_pool(&name).is_some() {
+            return Err(self.lexer.error(&format!("duplicate pool '{}'", String::from_utf8_lossy(&name))));
+        }
+
+        let mut depth = None;
+        while self.lexer.peek_token(LexerToken::INDENT) {
+            let (key, value) = self.parse_let()?;
+
+            if key != b"depth" {
+                return Err(self.lexer.error(&format!("unexpected variable '{}'", String::from_utf8_lossy(&key))))
+            }
+
+            let depth_string = value.evaluate(&self.env.borrow() as &BindingEnv);
+            let depth_value = String::from_utf8_lossy(&depth_string).parse::<isize>().ok()
+                        .and_then(|v| if v >= 0 { Some(v) } else { None });
+            if depth_value.is_none() {
+                return Err(self.lexer.error("invalid pool depth"));
+            }
+            depth = depth_value;
+        }
+
+        let depth = depth.ok_or_else(|| { self.lexer.error("expected 'depth =' line") })?;
+
+        self.state.add_pool(Pool::new(name, depth));
+        Ok(())
     }
 
     fn parse_rule(&mut self) -> Result<(), String> {
@@ -192,202 +239,96 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
     }
 
     fn parse_edge(&mut self) -> Result<(), String> {
-        unimplemented!()
-    }
+        let mut ins = Vec::new();
+        let mut outs = Vec::new();
 
-    fn parse_default(&mut self) -> Result<(), String> {
-        unimplemented!()
-    }
+        loop {
+            let mut out = EvalString::new();
+            self.lexer.read_path(&mut out)?;
 
-    /// Parse either a 'subninja' or 'include' line.
-    fn parse_file_include(&mut self, new_scope: bool) -> Result<(), String> {
-        unimplemented!()
-    }
-
-    /// If the next token is not \a expected, produce an error string
-    /// saying "expectd foo, got bar".
-    fn expect_token(&mut self, expected: LexerToken) -> Result<(), String> {
-        let token = self.lexer.read_token();
-        if token == expected {
-            Ok(())
-        } else {
-            let message = format!("expected {}, got {}{}", expected.name(), token.name(), expected.error_hint());
-            Err(self.lexer.error(&message))
+            if out.is_empty() {
+                break;
+            }
+            outs.push(out);
         }
-    }
 
-}
+        // Add all implicit outs, counting how many as we go.
+        let mut implicit_outs = 0isize;
+        if self.lexer.peek_token(LexerToken::PIPE) {
+            loop {
+                let mut out = EvalString::new();
+                self.lexer.read_path(&mut out)?;
+
+                if out.is_empty() {
+                    break;
+                }
+                outs.push(out);
+                implicit_outs += 1;
+            }
+        }
+
+        if outs.is_empty() {
+            return Err(self.lexer.error("expected path"));
+        }
+
+        self.expect_token(LexerToken::COLON)?;
+
+        let env = self.env.borrow();
+        let rule = {
+            let rule_name = self.lexer.read_ident("expected build command name")?.to_owned();
+            env.lookup_rule(&rule_name).ok_or_else(|| {
+                self.lexer.error(&format!("unknown build rule '{}'", String::from_utf8_lossy(&rule_name)))
+            })?
+        };
+
+        loop {
+            // XXX should we require one path here?
+            let mut in_ = EvalString::new();
+            self.lexer.read_path(&mut in_)?;
+
+            if in_.is_empty() {
+                break;
+            }
+            ins.push(in_);
+        }
+
+        // Add all implicit deps, counting how many as we go.
+        let mut implicit = 0isize;
+        if self.lexer.peek_token(LexerToken::PIPE) {
+            loop {
+                let mut in_ = EvalString::new();
+                self.lexer.read_path(&mut in_)?;
+
+                if in_.is_empty() {
+                    break;
+                }
+                ins.push(in_);
+                implicit += 1;
+            }
+        }
+
+        // Add all order-only deps, counting how many as we go.
+        let mut order_only = 0isize;
+        if self.lexer.peek_token(LexerToken::PIPE2) {
+            loop {
+                let mut in_ = EvalString::new();
+                self.lexer.read_path(&mut in_)?;
+
+                if in_.is_empty() {
+                    break;
+                }
+                ins.push(in_);
+                order_only += 1;
+            }
+        }
+        //self.expect_token(LexerToken::NEWLINE)?;
+
 
 /*
 
-bool ManifestParser::Load(const string& filename, string* err, Lexer* parent) {
-  METRIC_RECORD(".ninja parse");
-  string contents;
-  string read_err;
-  if (file_reader_->ReadFile(filename, &contents, &read_err) != FileReader::Okay) {
-    *err = "loading '" + filename + "': " + read_err;
-    if (parent)
-      parent->Error(string(*err), err);
-    return false;
-  }
-
-  // The lexer needs a nul byte at the end of its input, to know when it's done.
-  // It takes a StringPiece, and StringPiece's string constructor uses
-  // string::data().  data()'s return value isn't guaranteed to be
-  // null-terminated (although in practice - libc++, libstdc++, msvc's stl --
-  // it is, and C++11 demands that too), so add an explicit nul byte.
-  contents.resize(contents.size() + 1);
-
-  return Parse(filename, contents, err);
-}
 
 
-bool ManifestParser::ParsePool(string* err) {
-  string name;
-  if (!lexer_.ReadIdent(&name))
-    return lexer_.Error("expected pool name", err);
-
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  if (state_->LookupPool(name) != NULL)
-    return lexer_.Error("duplicate pool '" + name + "'", err);
-
-  int depth = -1;
-
-  while (lexer_.PeekToken(Lexer::INDENT)) {
-    string key;
-    EvalString value;
-    if (!ParseLet(&key, &value, err))
-      return false;
-
-    if (key == "depth") {
-      string depth_string = value.Evaluate(env_);
-      depth = atol(depth_string.c_str());
-      if (depth < 0)
-        return lexer_.Error("invalid pool depth", err);
-    } else {
-      return lexer_.Error("unexpected variable '" + key + "'", err);
-    }
-  }
-
-  if (depth < 0)
-    return lexer_.Error("expected 'depth =' line", err);
-
-  state_->AddPool(new Pool(name, depth));
-  return true;
-}
-
-
-
-bool ManifestParser::ParseDefault(string* err) {
-  EvalString eval;
-  if (!lexer_.ReadPath(&eval, err))
-    return false;
-  if (eval.empty())
-    return lexer_.Error("expected target name", err);
-
-  do {
-    string path = eval.Evaluate(env_);
-    string path_err;
-    uint64_t slash_bits;  // Unused because this only does lookup.
-    if (!CanonicalizePath(&path, &slash_bits, &path_err))
-      return lexer_.Error(path_err, err);
-    if (!state_->AddDefault(path, &path_err))
-      return lexer_.Error(path_err, err);
-
-    eval.Clear();
-    if (!lexer_.ReadPath(&eval, err))
-      return false;
-  } while (!eval.empty());
-
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  return true;
-}
-
-bool ManifestParser::ParseEdge(string* err) {
-  vector<EvalString> ins, outs;
-
-  {
-    EvalString out;
-    if (!lexer_.ReadPath(&out, err))
-      return false;
-    while (!out.empty()) {
-      outs.push_back(out);
-
-      out.Clear();
-      if (!lexer_.ReadPath(&out, err))
-        return false;
-    }
-  }
-
-  // Add all implicit outs, counting how many as we go.
-  int implicit_outs = 0;
-  if (lexer_.PeekToken(Lexer::PIPE)) {
-    for (;;) {
-      EvalString out;
-      if (!lexer_.ReadPath(&out, err))
-        return err;
-      if (out.empty())
-        break;
-      outs.push_back(out);
-      ++implicit_outs;
-    }
-  }
-
-  if (outs.empty())
-    return lexer_.Error("expected path", err);
-
-  if (!ExpectToken(Lexer::COLON, err))
-    return false;
-
-  string rule_name;
-  if (!lexer_.ReadIdent(&rule_name))
-    return lexer_.Error("expected build command name", err);
-
-  const Rule* rule = env_->LookupRule(rule_name);
-  if (!rule)
-    return lexer_.Error("unknown build rule '" + rule_name + "'", err);
-
-  for (;;) {
-    // XXX should we require one path here?
-    EvalString in;
-    if (!lexer_.ReadPath(&in, err))
-      return false;
-    if (in.empty())
-      break;
-    ins.push_back(in);
-  }
-
-  // Add all implicit deps, counting how many as we go.
-  int implicit = 0;
-  if (lexer_.PeekToken(Lexer::PIPE)) {
-    for (;;) {
-      EvalString in;
-      if (!lexer_.ReadPath(&in, err))
-        return err;
-      if (in.empty())
-        break;
-      ins.push_back(in);
-      ++implicit;
-    }
-  }
-
-  // Add all order-only deps, counting how many as we go.
-  int order_only = 0;
-  if (lexer_.PeekToken(Lexer::PIPE2)) {
-    for (;;) {
-      EvalString in;
-      if (!lexer_.ReadPath(&in, err))
-        return false;
-      if (in.empty())
-        break;
-      ins.push_back(in);
-      ++order_only;
-    }
-  }
+  
 
   if (!ExpectToken(Lexer::NEWLINE, err))
     return false;
@@ -489,6 +430,68 @@ bool ManifestParser::ParseEdge(string* err) {
   }
 
   return true;
+*/
+        unimplemented!()
+    }
+
+    fn parse_default(&mut self) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    /// Parse either a 'subninja' or 'include' line.
+    fn parse_file_include(&mut self, new_scope: bool) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    /// If the next token is not \a expected, produce an error string
+    /// saying "expectd foo, got bar".
+    fn expect_token(&mut self, expected: LexerToken) -> Result<(), String> {
+        let token = self.lexer.read_token();
+        if token == expected {
+            Ok(())
+        } else {
+            let message = format!("expected {}, got {}{}", expected.name(), token.name(), expected.error_hint());
+            Err(self.lexer.error(&message))
+        }
+    }
+
+}
+
+/*
+
+
+
+
+
+
+bool ManifestParser::ParseDefault(string* err) {
+  EvalString eval;
+  if (!lexer_.ReadPath(&eval, err))
+    return false;
+  if (eval.empty())
+    return lexer_.Error("expected target name", err);
+
+  do {
+    string path = eval.Evaluate(env_);
+    string path_err;
+    uint64_t slash_bits;  // Unused because this only does lookup.
+    if (!CanonicalizePath(&path, &slash_bits, &path_err))
+      return lexer_.Error(path_err, err);
+    if (!state_->AddDefault(path, &path_err))
+      return lexer_.Error(path_err, err);
+
+    eval.Clear();
+    if (!lexer_.ReadPath(&eval, err))
+      return false;
+  } while (!eval.empty());
+
+  if (!ExpectToken(Lexer::NEWLINE, err))
+    return false;
+
+  return true;
+}
+
+bool ManifestParser::ParseEdge(string* err) {
 }
 
 bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
@@ -522,30 +525,32 @@ mod parser_test {
     use super::super::test::VirtualFileSystem;
 
     struct ParserTest<'a> {
-        pub state: State<'a>,
+        pub state: RefCell<State<'a>>,
         pub fs: VirtualFileSystem,
     }
 
     impl<'a> ParserTest<'a> {
         pub fn new() -> Self {
             ParserTest {
-                state: State::new(),
+                state: RefCell::new(State::new()),
                 fs: VirtualFileSystem::new(),
             }
         }
 
-        pub fn assert_parse(&'a self, input: &[u8]) -> () {
+        pub fn assert_parse(&mut self, input: &[u8]) -> () {
             {
-              let mut parser = ManifestParser::new(&self.state, &self.fs, Default::default());
+              let mut state = self.state.borrow_mut();
+              let mut parser = ManifestParser::new(&mut state, 
+                &self.fs, Default::default());
               assert_eq!(Ok(()), parser.parse_test(input));
             }
-            assert_eq!((), self.state.verify_graph());
+            assert_eq!((), self.state.borrow().verify_graph());
         }
     }
 
     #[test]
     fn parsertest_empty() {
-        let parsertest = ParserTest::new();
+        let mut parsertest = ParserTest::new();
         parsertest.assert_parse(b"");
     }
 
@@ -561,33 +566,35 @@ mod parser_test {
           "\n",
           "build result: cat in_1.cc in-2.O\n"
           ).as_bytes());
-        assert_eq!(3usize, parsertest.state.bindings.borrow().get_rules().len());
-        let bindings = parsertest.state.bindings.borrow();
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(3usize, bindings.get_rules().len());
         let rule = bindings.get_rules().iter().next().unwrap().1;
         assert_eq!(b"cat", rule.name());
         assert_eq!(b"[cat ][$in][ > ][$out]".as_ref().to_owned(), 
             rule.get_binding(b"command").unwrap().serialize());
     }
 
-}
+    #[test]
+    fn parsertest_ruleattributes() {
+        let mut parsertest = ParserTest::new();
+        // Check that all of the allowed rule attributes are parsed ok.
+        parsertest.assert_parse(concat!(
+          "rule cat\n",
+          "  command = a\n",
+          "  depfile = a\n",
+          "  deps = a\n",
+          "  description = a\n",
+          "  generator = a\n",
+          "  restat = a\n",
+          "  rspfile = a\n",
+          "  rspfile_content = a\n"
+          ).as_bytes());
+    }
+
 
 
 /*
-
-TEST_F(ParserTest, RuleAttributes) {
-  // Check that all of the allowed rule attributes are parsed ok.
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = a\n"
-"  depfile = a\n"
-"  deps = a\n"
-"  description = a\n"
-"  generator = a\n"
-"  restat = a\n"
-"  rspfile = a\n"
-"  rspfile_content = a\n"
-));
-}
 
 TEST_F(ParserTest, IgnoreIndentedComments) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(
@@ -1573,27 +1580,33 @@ TEST_F(ParserTest, DefaultStatements) {
   EXPECT_EQ("b", nodes[1]->path());
   EXPECT_EQ("c", nodes[2]->path());
 }
-
-TEST_F(ParserTest, UTF8) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule utf8\n"
-"  command = true\n"
-"  description = compilaci\xC3\xB3\n"));
-}
-
-TEST_F(ParserTest, CRLF) {
-  State local_state;
-  ManifestParser parser(&local_state, NULL);
-  string err;
-
-  EXPECT_TRUE(parser.ParseTest("# comment with crlf\r\n", &err));
-  EXPECT_TRUE(parser.ParseTest("foo = foo\nbar = bar\r\n", &err));
-  EXPECT_TRUE(parser.ParseTest(
-      "pool link_pool\r\n"
-      "  depth = 15\r\n\r\n"
-      "rule xyz\r\n"
-      "  command = something$expand \r\n"
-      "  description = YAY!\r\n",
-      &err));
-}
 */
+
+    #[test]
+    fn parsertest_utf8() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!("rule utf8\n",
+          "  command = true\n",
+          "  description = compilaci\u{F3}\n").as_bytes());
+    }
+
+    #[test]
+    fn parsertest_crlf() {
+        let inputs = [
+            "# comment with crlf\r\n",
+            "foo = foo\nbar = bar\r\n",
+            concat!(
+              "pool link_pool\r\n",
+              "  depth = 15\r\n\r\n",
+              "rule xyz\r\n",
+              "  command = something$expand \r\n",
+              "  description = YAY!\r\n",
+            )
+        ];
+        for input in inputs.into_iter() {
+            let mut parsertest = ParserTest::new();
+            parsertest.assert_parse(input.as_bytes());
+        }
+    }
+
+}

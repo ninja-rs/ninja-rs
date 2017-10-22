@@ -14,10 +14,42 @@
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
+use std::cmp::{PartialOrd, Ordering};
 
 use super::eval_env::{BindingEnv, Rule};
 use super::graph::{Edge, Node};
+
+struct DelayedEdge<'a>(pub &'a Edge);
+
+impl<'a> PartialEq for DelayedEdge<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 as * const _ as usize == 
+            other.0 as * const _ as usize
+    }
+}
+
+impl<'a> PartialOrd for DelayedEdge<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Eq for DelayedEdge<'a> {}
+impl<'a> Ord for DelayedEdge<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // if (!a) return b;
+        // if (!b) return false;
+        let weight1 = self.0.weight();
+        let weight2 = other.0.weight();
+        if weight1 != weight2 {
+            weight1.cmp(&weight2)
+        } else {
+            (self.0 as * const _ as usize)
+                .cmp(&(other.0 as * const _ as usize))
+        }
+    }
+}
 
 /// A pool for delayed edges.
 /// Pools are scoped to a State. Edges within a State will share Pools. A Pool
@@ -27,21 +59,48 @@ use super::graph::{Edge, Node};
 /// allowing the Plan to schedule it. The Pool will relinquish queued Edges when
 /// the total scheduled weight diminishes enough (i.e. when a scheduled edge
 /// completes).
-struct Pool {
+pub struct Pool {
+    name: Vec<u8>,
+    /// |current_use_| is the total of the weights of the edges which are
+    /// currently scheduled in the Plan (i.e. the edges in Plan::ready_).
+    current_use: isize,
+    depth: isize,
+    
+    delayed: BTreeSet<DelayedEdge<'static>>,
+}
+
+impl Pool {
+    pub fn new(name: Vec<u8>, depth: isize) -> Self {
+        Pool {
+            name,
+            current_use: 0,
+            depth,
+            delayed: BTreeSet::new(),
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        // A depth of 0 is infinite
+        self.depth >= 0
+    }
+
+    pub fn depth(&self) -> isize {
+        self.depth
+    }
+
+    pub fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    pub fn current_use(&self) -> isize {
+        self.current_use
+    }
 
 }
 
 /*
 
 struct Pool {
-  Pool(const string& name, int depth)
-    : name_(name), current_use_(0), depth_(depth), delayed_(&WeightedEdgeCmp) {}
-
-  // A depth of 0 is infinite
-  bool is_valid() const { return depth_ >= 0; }
-  int depth() const { return depth_; }
-  const string& name() const { return name_; }
-  int current_use() const { return current_use_; }
 
   /// true if the Pool might delay this edge
   bool ShouldDelayEdge() const { return depth_ != 0; }
@@ -133,7 +192,7 @@ pub struct State<'a> {
     paths: HashMap<String, &'a Node<'a>>,
     
     /// All the pools used in the graph.
-    pools: HashMap<String, &'a Pool>,
+    pools: HashMap<Vec<u8>, Pool>,
 
     /// All the edges of the graph.
     edges: Vec<&'a Edge>,
@@ -151,6 +210,19 @@ impl<'a> State<'a> {
             bindings: Rc::new(RefCell::new(BindingEnv::new())),
             defaults: Vec::new()
         }
+    }
+
+    pub fn add_pool(&mut self, pool: Pool) {
+        assert!(self.lookup_pool(pool.name()).is_none());
+        self.pools.insert(pool.name().to_owned(), pool);
+    }
+
+    pub fn lookup_pool(&self, pool_name: &[u8]) -> Option<&Pool> {
+        self.pools.get(pool_name)
+    }
+
+    pub fn clone_bindings(&self) -> Rc<RefCell<BindingEnv<'a>>> {
+        self.bindings.clone()
     }
 }
 
@@ -209,6 +281,222 @@ void VerifyGraph(const State& state) {
   }
   set<const Edge*> edge_set(state.edges_.begin(), state.edges_.end());
   EXPECT_EQ(node_edge_set, edge_set);
+}
+
+*/
+
+/*
+// Copyright 2011 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "state.h"
+
+#include <assert.h>
+#include <stdio.h>
+
+#include "edit_distance.h"
+#include "graph.h"
+#include "metrics.h"
+#include "util.h"
+
+
+void Pool::EdgeScheduled(const Edge& edge) {
+  if (depth_ != 0)
+    current_use_ += edge.weight();
+}
+
+void Pool::EdgeFinished(const Edge& edge) {
+  if (depth_ != 0)
+    current_use_ -= edge.weight();
+}
+
+void Pool::DelayEdge(Edge* edge) {
+  assert(depth_ != 0);
+  delayed_.insert(edge);
+}
+
+void Pool::RetrieveReadyEdges(set<Edge*>* ready_queue) {
+  DelayedEdges::iterator it = delayed_.begin();
+  while (it != delayed_.end()) {
+    Edge* edge = *it;
+    if (current_use_ + edge->weight() > depth_)
+      break;
+    ready_queue->insert(edge);
+    EdgeScheduled(*edge);
+    ++it;
+  }
+  delayed_.erase(delayed_.begin(), it);
+}
+
+void Pool::Dump() const {
+  printf("%s (%d/%d) ->\n", name_.c_str(), current_use_, depth_);
+  for (DelayedEdges::const_iterator it = delayed_.begin();
+       it != delayed_.end(); ++it)
+  {
+    printf("\t");
+    (*it)->Dump();
+  }
+}
+
+// static
+bool Pool::WeightedEdgeCmp(const Edge* a, const Edge* b) {
+  if (!a) return b;
+  if (!b) return false;
+  int weight_diff = a->weight() - b->weight();
+  return ((weight_diff < 0) || (weight_diff == 0 && a < b));
+}
+
+Pool State::kDefaultPool("", 0);
+Pool State::kConsolePool("console", 1);
+const Rule State::kPhonyRule("phony");
+
+State::State() {
+  bindings_.AddRule(&kPhonyRule);
+  AddPool(&kDefaultPool);
+  AddPool(&kConsolePool);
+}
+
+void State::AddPool(Pool* pool) {
+  assert(LookupPool(pool->name()) == NULL);
+  pools_[pool->name()] = pool;
+}
+
+Pool* State::LookupPool(const string& pool_name) {
+  map<string, Pool*>::iterator i = pools_.find(pool_name);
+  if (i == pools_.end())
+    return NULL;
+  return i->second;
+}
+
+Edge* State::AddEdge(const Rule* rule) {
+  Edge* edge = new Edge();
+  edge->rule_ = rule;
+  edge->pool_ = &State::kDefaultPool;
+  edge->env_ = &bindings_;
+  edges_.push_back(edge);
+  return edge;
+}
+
+Node* State::GetNode(StringPiece path, uint64_t slash_bits) {
+  Node* node = LookupNode(path);
+  if (node)
+    return node;
+  node = new Node(path.AsString(), slash_bits);
+  paths_[node->path()] = node;
+  return node;
+}
+
+Node* State::LookupNode(StringPiece path) const {
+  METRIC_RECORD("lookup node");
+  Paths::const_iterator i = paths_.find(path);
+  if (i != paths_.end())
+    return i->second;
+  return NULL;
+}
+
+Node* State::SpellcheckNode(const string& path) {
+  const bool kAllowReplacements = true;
+  const int kMaxValidEditDistance = 3;
+
+  int min_distance = kMaxValidEditDistance + 1;
+  Node* result = NULL;
+  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i) {
+    int distance = EditDistance(
+        i->first, path, kAllowReplacements, kMaxValidEditDistance);
+    if (distance < min_distance && i->second) {
+      min_distance = distance;
+      result = i->second;
+    }
+  }
+  return result;
+}
+
+void State::AddIn(Edge* edge, StringPiece path, uint64_t slash_bits) {
+  Node* node = GetNode(path, slash_bits);
+  edge->inputs_.push_back(node);
+  node->AddOutEdge(edge);
+}
+
+bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits) {
+  Node* node = GetNode(path, slash_bits);
+  if (node->in_edge())
+    return false;
+  edge->outputs_.push_back(node);
+  node->set_in_edge(edge);
+  return true;
+}
+
+bool State::AddDefault(StringPiece path, string* err) {
+  Node* node = LookupNode(path);
+  if (!node) {
+    *err = "unknown target '" + path.AsString() + "'";
+    return false;
+  }
+  defaults_.push_back(node);
+  return true;
+}
+
+vector<Node*> State::RootNodes(string* err) const {
+  vector<Node*> root_nodes;
+  // Search for nodes with no output.
+  for (vector<Edge*>::const_iterator e = edges_.begin();
+       e != edges_.end(); ++e) {
+    for (vector<Node*>::const_iterator out = (*e)->outputs_.begin();
+         out != (*e)->outputs_.end(); ++out) {
+      if ((*out)->out_edges().empty())
+        root_nodes.push_back(*out);
+    }
+  }
+
+  if (!edges_.empty() && root_nodes.empty())
+    *err = "could not determine root nodes of build graph";
+
+  return root_nodes;
+}
+
+vector<Node*> State::DefaultNodes(string* err) const {
+  return defaults_.empty() ? RootNodes(err) : defaults_;
+}
+
+void State::Reset() {
+  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i)
+    i->second->ResetState();
+  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e) {
+    (*e)->outputs_ready_ = false;
+    (*e)->mark_ = Edge::VisitNone;
+  }
+}
+
+void State::Dump() {
+  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i) {
+    Node* node = i->second;
+    printf("%s %s [id:%d]\n",
+           node->path().c_str(),
+           node->status_known() ? (node->dirty() ? "dirty" : "clean")
+                                : "unknown",
+           node->id());
+  }
+  if (!pools_.empty()) {
+    printf("resource_pools:\n");
+    for (map<string, Pool*>::const_iterator it = pools_.begin();
+         it != pools_.end(); ++it)
+    {
+      if (!it->second->name().empty()) {
+        it->second->Dump();
+      }
+    }
+  }
 }
 
 */
