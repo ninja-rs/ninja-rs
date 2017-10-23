@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::collections::HashMap;
 
 /// An interface for a scope for variable (e.g. "$foo") lookups.
 pub trait Env {
-    fn lookup_variable(&self, var: &[u8]) -> &[u8];
-
-    fn lookup_rule(&self, rule_name: &[u8]) -> Option<&Rule>;
+    fn lookup_variable(&self, var: &[u8]) -> Cow<[u8]>;
 }
 
 #[derive(PartialEq, Clone)]
@@ -139,13 +139,13 @@ impl Rule {
 
 /// An Env which contains a mapping of variables to values
 /// as well as a pointer to a parent scope.
-pub struct BindingEnv<'a> {
+pub struct BindingEnv {
     bindings: HashMap<Vec<u8>, Vec<u8>>,
-    rules: HashMap<Vec<u8>, Rule>,
-    parent: Option<&'a Env>
+    rules: HashMap<Vec<u8>, Rc<Rule>>,
+    parent: Option<Rc<RefCell<BindingEnv>>>
 }
 
-impl<'a> BindingEnv<'a> {
+impl BindingEnv {
     pub fn new() -> Self {
         BindingEnv {
             bindings: HashMap::new(),
@@ -154,7 +154,7 @@ impl<'a> BindingEnv<'a> {
         }
     }
 
-    pub fn new_with_parent(parent: Option<&'a Env>) -> Self {
+    pub fn new_with_parent(parent: Option<Rc<RefCell<BindingEnv>>>) -> Self {
         BindingEnv {
             bindings: HashMap::new(),
             rules: HashMap::new(),
@@ -166,7 +166,7 @@ impl<'a> BindingEnv<'a> {
         self.bindings.insert(key.to_owned(), val.to_owned());
     }
 
-    pub fn lookup_rule_current_scope(&self, rule_name: &[u8]) -> Option<&Rule> {
+    pub fn lookup_rule_current_scope(&self, rule_name: &[u8]) -> Option<&Rc<Rule>> {
         if let Some(rule) = self.rules.get(rule_name) {
             return Some(rule);
         }
@@ -174,12 +174,24 @@ impl<'a> BindingEnv<'a> {
         return None;
     }
 
-    pub fn add_rule(&mut self, rule: Rule) {
+    pub fn lookup_rule(&self, rule_name: &[u8]) -> Option<Cow<Rc<Rule>>> {
+        if let Some(rule) = self.rules.get(rule_name) {
+            return Some(Cow::Borrowed(rule));
+        }
+
+        if let Some(ref parent) = self.parent {
+            return parent.borrow().lookup_rule(rule_name).map(|c| Cow::Owned(c.into_owned()));
+        }
+
+        return None;
+    }
+
+    pub fn add_rule(&mut self, rule: Rc<Rule>) {
         debug_assert!(self.lookup_rule_current_scope(rule.name()).is_none());
         self.rules.insert(rule.name().to_owned(), rule);
     }
 
-    pub fn get_rules(&self) -> &HashMap<Vec<u8>, Rule> {
+    pub fn get_rules(&self) -> &HashMap<Vec<u8>, Rc<Rule>> {
         return &self.rules;
     }
 
@@ -196,34 +208,21 @@ impl<'a> BindingEnv<'a> {
             return eval.evaluate(env).into();
         }
 
-        if let Some(parent) = self.parent {
-            return parent.lookup_variable(var).into();
+        if let Some(ref parent) = self.parent {
+            return Cow::Owned(parent.borrow().lookup_variable(var).into_owned());
         }
         return b"".as_ref().into();
     }
 }
 
-impl<'a> Env for BindingEnv<'a> {
-    fn lookup_variable(&self, var: &[u8]) -> &[u8] {
+impl Env for BindingEnv {
+    fn lookup_variable(&self, var: &[u8]) -> Cow<[u8]> {
         if let Some(self_binding) = self.bindings.get(var) {
-            return self_binding;
+            return Cow::Borrowed(self_binding);
         }
-        if let Some(parent) = self.parent {
-            return parent.lookup_variable(var);
+        if let Some(ref parent) = self.parent {
+            return Cow::Owned(parent.borrow().lookup_variable(var).into_owned());
         }
-        return b"";
+        return Cow::Borrowed(b"");
     }
-
-    fn lookup_rule(&self, rule_name: &[u8]) -> Option<&Rule> {
-        if let Some(rule) = self.rules.get(rule_name) {
-            return Some(rule);
-        }
-
-        if let Some(parent) = self.parent {
-            return parent.lookup_rule(rule_name);
-        }
-
-        return None;
-    }
-
 }

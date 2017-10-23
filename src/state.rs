@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, BTreeSet};
 use std::cmp::{PartialOrd, Ordering};
 
 use super::eval_env::{BindingEnv, Rule};
-use super::graph::{Edge, Node};
+use super::graph::{Edge, Node, EdgeIndex, NodeIndex};
 
 struct DelayedEdge<'a>(pub &'a Edge);
 
@@ -186,50 +186,162 @@ struct State {
 #endif  // NINJA_STATE_H_
 */
 
-/// Global state (file status) for a single run.
-pub struct State<'a> {
-    /// Mapping of path -> Node.
-    paths: HashMap<String, &'a Node<'a>>,
-    
-    /// All the pools used in the graph.
-    pools: HashMap<Vec<u8>, Pool>,
+thread_local!{ 
+    static DEFAULT_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"".as_ref().to_owned(), 0)));
+    static CONSOLE_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"console".as_ref().to_owned(), 1)));
 
-    /// All the edges of the graph.
-    edges: Vec<&'a Edge>,
-
-    pub bindings: Rc<RefCell<BindingEnv<'a>>>,
-    defaults: Vec<&'a Node<'a>>,
+    static PHONY_RULE: Rc<Rule> = Rc::new(Rule::new(b"phony".as_ref().to_owned()));
 }
 
-impl<'a> State<'a> {
+pub struct NodeState {
+    /// All the nodes of the graph.
+    nodes: Vec<Node>,
+
+    /// Mapping of path -> Node.
+    paths: HashMap<Vec<u8>, NodeIndex>,
+}
+
+impl NodeState {
     pub fn new() -> Self {
-        State {
+        NodeState {
+            nodes: Vec::new(),
             paths: HashMap::new(),
-            pools: HashMap::new(),
-            edges: Vec::new(),
-            bindings: Rc::new(RefCell::new(BindingEnv::new())),
-            defaults: Vec::new()
         }
     }
 
-    pub fn add_pool(&mut self, pool: Pool) {
-        assert!(self.lookup_pool(pool.name()).is_none());
-        self.pools.insert(pool.name().to_owned(), pool);
+    pub fn prepare_node(&mut self, path: &[u8], slash_bits: u64) -> NodeIndex {
+        let node_idx = self.lookup_node(path);
+        if node_idx.is_some() {
+            return node_idx.unwrap();
+        }
+
+        let node = Node::new(path, slash_bits);
+        self.nodes.push(node);
+        let node_idx = NodeIndex(self.nodes.len());
+        self.paths.insert(path.to_owned(), node_idx);
+        node_idx
     }
 
-    pub fn lookup_pool(&self, pool_name: &[u8]) -> Option<&Pool> {
+    pub fn lookup_node(&self, path: &[u8]) -> Option<NodeIndex> {
+        metric_record!("lookup node", record);
+        self.paths.get(path).cloned()
+    }
+
+    pub fn get_node(&self, idx: NodeIndex) -> &Node {
+        self.nodes.get(idx.0).expect("index out of range")
+    }
+
+    pub fn get_node_mut(&mut self, idx: NodeIndex) -> &mut Node {
+        self.nodes.get_mut(idx.0).expect("index out of range")
+    }    
+}
+
+pub struct EdgeState {
+    /// All the edges of the graph.
+    edges: Vec<Edge>,
+}
+
+impl EdgeState {
+    pub fn new() -> Self {
+        EdgeState {
+            edges: Vec::new()
+        }
+    }
+
+    pub fn get_edge(&self, idx: EdgeIndex) -> &Edge {
+        self.edges.get(idx.0).expect("index out of range")
+    }
+
+    pub fn get_edge_mut(&mut self, idx: EdgeIndex) -> &mut Edge {
+        self.edges.get_mut(idx.0).expect("index out of range")
+    }
+
+    pub fn make_edge(&mut self, rule: Rc<Rule>, bindings: Rc<RefCell<BindingEnv>>) -> EdgeIndex {
+        let mut edge = Edge::new(rule, DEFAULT_POOL.with(Clone::clone), bindings);
+        self.edges.push(edge);
+        EdgeIndex(self.edges.len() - 1)
+    }
+
+    pub fn revoke_latest_edge(&mut self, idx: EdgeIndex) {
+        if self.edges.len() != idx.0 + 1 {
+            panic!("trying to revoke an edge that is not the latest one.")
+        }
+        self.edges.pop();
+    }
+}
+
+pub struct PoolState {
+    /// All the pools used in the graph.
+    pools: HashMap<Vec<u8>, Rc<RefCell<Pool>>>,
+}
+
+impl PoolState {
+    pub fn new() -> Self {
+        PoolState {
+            pools: HashMap::new()
+        }
+    }
+
+    pub fn add_pool(&mut self, pool: Rc<RefCell<Pool>>) {
+        assert!(self.lookup_pool(pool.borrow().name()).is_none());
+        let name = pool.borrow().name().to_owned();
+        self.pools.insert(name, pool);
+    }
+
+    pub fn lookup_pool(&self, pool_name: &[u8]) -> Option<&Rc<RefCell<Pool>>> {
         self.pools.get(pool_name)
     }
+}
 
-    pub fn clone_bindings(&self) -> Rc<RefCell<BindingEnv<'a>>> {
+/// Global state (file status) for a single run.
+pub struct State {
+    pub node_state: NodeState,
+    pub edge_state: EdgeState,
+    pub pool_state: PoolState,
+
+    pub bindings: Rc<RefCell<BindingEnv>>,
+    defaults: Vec<NodeIndex>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        let mut state = State {
+            node_state: NodeState::new(),
+            edge_state: EdgeState::new(),
+            pool_state: PoolState::new(),
+            bindings: Rc::new(RefCell::new(BindingEnv::new())),
+            defaults: Vec::new()
+        };
+
+        state.bindings.borrow_mut().add_rule(PHONY_RULE.with(Rc::clone));
+        state.pool_state.add_pool(DEFAULT_POOL.with(Rc::clone));
+        state.pool_state.add_pool(CONSOLE_POOL.with(Rc::clone));
+        state
+    }
+
+    pub fn connect_edge_to_in_node(edge: &mut Edge, edge_idx: EdgeIndex, node: &mut Node, node_idx: NodeIndex) {
+        edge.inputs.push(node_idx);
+        node.add_out_edge(edge_idx);
+    }
+    
+    pub fn connect_edge_to_out_node(edge: &mut Edge, edge_idx: EdgeIndex, node: &mut Node, node_idx: NodeIndex) -> bool {
+        if node.in_edge().is_some() {
+            return false;
+        }
+        edge.outputs.push(node_idx);
+        node.set_in_edge(Some(edge_idx));
+        return true;
+    }
+
+    pub fn get_env(&self) -> Rc<RefCell<BindingEnv>> {
         self.bindings.clone()
     }
 }
 
 #[cfg(test)]
-impl<'a> State<'a> {
+impl State {
     pub fn verify_graph(&self) {
-        for e in self.edges.iter() {
+        for e in self.edge_state.edges.iter() {
             /*
             // All edges need at least one output.
             EXPECT_FALSE((*e)->outputs_.empty());
@@ -250,15 +362,15 @@ impl<'a> State<'a> {
         }
 
         // The union of all in- and out-edges of each nodes should be exactly edges_.
+        assert_eq!(self.node_state.paths.len(), self.node_state.nodes.len());
         let mut node_edge_set = HashSet::new();
-        for p in self.paths.iter() {
-            let n = p.1;
+        for n in self.node_state.nodes.iter() {
             if let Some(in_edge) = n.in_edge() {
-                node_edge_set.insert(in_edge as * const _);
+                node_edge_set.insert(self.edge_state.get_edge(in_edge) as * const _);
             }
-            node_edge_set.extend(n.out_edges().iter().map(|&r| r as * const _));
+            node_edge_set.extend(n.out_edges().iter().map(|&r| self.edge_state.get_edge(r) as * const _));
         }
-        let edge_set = self.edges.iter().map(|&r| r as * const _).collect::<HashSet<_>>();
+        let edge_set = self.edge_state.edges.iter().map(|r| r as * const _).collect::<HashSet<_>>();
         assert_eq!(node_edge_set, edge_set);
     }
 }
@@ -357,28 +469,6 @@ bool Pool::WeightedEdgeCmp(const Edge* a, const Edge* b) {
   return ((weight_diff < 0) || (weight_diff == 0 && a < b));
 }
 
-Pool State::kDefaultPool("", 0);
-Pool State::kConsolePool("console", 1);
-const Rule State::kPhonyRule("phony");
-
-State::State() {
-  bindings_.AddRule(&kPhonyRule);
-  AddPool(&kDefaultPool);
-  AddPool(&kConsolePool);
-}
-
-void State::AddPool(Pool* pool) {
-  assert(LookupPool(pool->name()) == NULL);
-  pools_[pool->name()] = pool;
-}
-
-Pool* State::LookupPool(const string& pool_name) {
-  map<string, Pool*>::iterator i = pools_.find(pool_name);
-  if (i == pools_.end())
-    return NULL;
-  return i->second;
-}
-
 Edge* State::AddEdge(const Rule* rule) {
   Edge* edge = new Edge();
   edge->rule_ = rule;
@@ -386,23 +476,6 @@ Edge* State::AddEdge(const Rule* rule) {
   edge->env_ = &bindings_;
   edges_.push_back(edge);
   return edge;
-}
-
-Node* State::GetNode(StringPiece path, uint64_t slash_bits) {
-  Node* node = LookupNode(path);
-  if (node)
-    return node;
-  node = new Node(path.AsString(), slash_bits);
-  paths_[node->path()] = node;
-  return node;
-}
-
-Node* State::LookupNode(StringPiece path) const {
-  METRIC_RECORD("lookup node");
-  Paths::const_iterator i = paths_.find(path);
-  if (i != paths_.end())
-    return i->second;
-  return NULL;
 }
 
 Node* State::SpellcheckNode(const string& path) {

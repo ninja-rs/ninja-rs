@@ -89,7 +89,7 @@ struct NinjaMain<'a> {
     /// Build configuration set from flags (e.g. parallelism).
     config: &'a BuildConfig,
     /// Loaded state (rules, nodes).
-    state: State<'a>,
+    state: State,
     /// Functions for accesssing the disk.
     disk_interface: RealDiskInterface,
     /// The build directory, used for storing the build log etc.

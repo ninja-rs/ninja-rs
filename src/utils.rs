@@ -97,22 +97,6 @@ pub fn get_processor_count() -> usize {
 
 /*
 
-#ifdef _WIN32
-#include "win32port.h"
-#else
-#include <stdint.h>
-#endif
-
-#include <string>
-#include <vector>
-using namespace std;
-
-#ifdef _MSC_VER
-#define NORETURN __declspec(noreturn)
-#else
-#define NORETURN __attribute__((noreturn))
-#endif
-
 /// Canonicalize a path like "foo/../bar.h" into just "bar.h".
 /// |slash_bits| has bits set starting from lowest for a backslash that was
 /// normalized to a forward slash. (only used on Windows)
@@ -223,7 +207,13 @@ NORETURN void Win32Fatal(const char* function);
 
 #include "edit_distance.h"
 #include "metrics.h"
+*/
 
+pub fn canonicalize_path(path: &mut Vec<u8>) -> Result<u64, String> {
+    unimplemented!()
+}
+
+/*
 bool CanonicalizePath(string* path, uint64_t* slash_bits, string* err) {
   METRIC_RECORD("canonicalize str");
   size_t len = path->size();

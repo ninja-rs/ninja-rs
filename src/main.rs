@@ -28,6 +28,7 @@ mod lexer;
 mod eval_env;
 mod manifest_parser;
 mod disk_interface;
+#[macro_use]
 mod metrics;
 mod state;
 mod ninja;

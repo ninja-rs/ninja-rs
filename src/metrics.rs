@@ -12,25 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// The Metrics module is used for the debug mode that dumps timing stats of
+/// various actions.  To use, see METRIC_RECORD below.
+
+/// A single metrics we're tracking, like "depfile load time".
+pub struct Metric {
+}
+
+/// A scoped object for recording a metric across the body of a function.
+/// Used by the METRIC_RECORD macro.
+pub struct ScopedMetric {
+}
+
+impl ScopedMetric {
+    pub fn new(metric: &Option<Metric>) -> Self {
+        ScopedMetric {}
+    }
+}
+
+
 pub struct Metrics {
 
 }
 
+impl Metrics {
+    pub fn new_metric(&self, tag: &'static str) -> Metric {
+        unimplemented!{}
+    }
+}
+
+/// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
+/// of a function to get timing stats recorded for each call of the function.
+macro_rules! metric_record {
+  ($metric: expr, $metric_var: ident) => { 
+      lazy_static! {
+          static ref $metric_var : Option<$crate::metrics::Metric> = 
+              $crate::debug_flags::METRICS.as_ref().map(|m| m.new_metric($metric));
+      }
+      let _ = $crate::metrics::ScopedMetric::new(&$metric_var);
+  };
+}
+
+
 /*
 
-
-
-#ifndef NINJA_METRICS_H_
-#define NINJA_METRICS_H_
-
-#include <string>
-#include <vector>
-using namespace std;
-
-#include "util.h"  // For int64_t.
-
-/// The Metrics module is used for the debug mode that dumps timing stats of
-/// various actions.  To use, see METRIC_RECORD below.
 
 /// A single metrics we're tracking, like "depfile load time".
 struct Metric {

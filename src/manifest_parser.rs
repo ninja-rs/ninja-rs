@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::rc::Rc;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::Path;
 use std::ffi::{OsString, OsStr};
@@ -20,9 +21,10 @@ use std::ffi::{OsString, OsStr};
 use super::lexer::Lexer;
 use super::lexer::Token as LexerToken;
 use super::state::{State, Pool};
-use super::eval_env::{Env, BindingEnv, EvalString, Rule};
+use super::eval_env::{BindingEnv, EvalString, Rule};
 use super::disk_interface::FileReader;
 use super::version::check_ninja_version;
+use super::utils::canonicalize_path;
 
 pub enum DupeEdgeAction {
     WARN,
@@ -55,18 +57,18 @@ impl Default for ManifestParserOptions {
 }
 
 /// Parses .ninja files.
-pub struct ManifestParser<'a, 'b : 'a, 'c : 'a> {
-    state: &'a mut State<'b>,
-    env:   Rc<RefCell<BindingEnv<'b>>>,
+pub struct ManifestParser<'a, 'c : 'a> {
+    state: &'a mut State,
+    env: Rc<RefCell<BindingEnv>>,
     file_reader: &'a FileReader,
     lexer: Lexer<'a, 'c>,
     options: ManifestParserOptions,
     quiet: bool
 }
 
-impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
-    pub fn new(state: &'a mut State<'b>, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
-        let env = state.clone_bindings();
+impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
+    pub fn new(state: &'a mut State, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
+        let env = state.get_env();
         ManifestParser {
             state,
             env: env,
@@ -171,7 +173,7 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
     fn parse_pool(&mut self) -> Result<(), String> {
         let name = self.lexer.read_ident("expected pool name")?.to_owned();
         self.expect_token(LexerToken::NEWLINE)?;
-        if self.state.lookup_pool(&name).is_some() {
+        if self.state.pool_state.lookup_pool(&name).is_some() {
             return Err(self.lexer.error(&format!("duplicate pool '{}'", String::from_utf8_lossy(&name))));
         }
 
@@ -194,7 +196,7 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
 
         let depth = depth.ok_or_else(|| { self.lexer.error("expected 'depth =' line") })?;
 
-        self.state.add_pool(Pool::new(name, depth));
+        self.state.pool_state.add_pool(Rc::new(RefCell::new(Pool::new(name, depth))));
         Ok(())
     }
 
@@ -226,7 +228,7 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
             return Err(self.lexer.error("expected 'command =' line"));
         }
 
-        self.env.borrow_mut().add_rule(rule);
+        self.env.borrow_mut().add_rule(Rc::new(rule));
         return Ok(());
     }
 
@@ -253,7 +255,7 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
         }
 
         // Add all implicit outs, counting how many as we go.
-        let mut implicit_outs = 0isize;
+        let mut implicit_outs = 0usize;
         if self.lexer.peek_token(LexerToken::PIPE) {
             loop {
                 let mut out = EvalString::new();
@@ -273,10 +275,10 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
 
         self.expect_token(LexerToken::COLON)?;
 
-        let env = self.env.borrow();
         let rule = {
             let rule_name = self.lexer.read_ident("expected build command name")?.to_owned();
-            env.lookup_rule(&rule_name).ok_or_else(|| {
+            let rule = self.env.borrow().lookup_rule(&rule_name).map(Cow::into_owned);
+            rule.ok_or_else(|| {
                 self.lexer.error(&format!("unknown build rule '{}'", String::from_utf8_lossy(&rule_name)))
             })?
         };
@@ -293,7 +295,7 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
         }
 
         // Add all implicit deps, counting how many as we go.
-        let mut implicit = 0isize;
+        let mut implicit = 0usize;
         if self.lexer.peek_token(LexerToken::PIPE) {
             loop {
                 let mut in_ = EvalString::new();
@@ -308,7 +310,7 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
         }
 
         // Add all order-only deps, counting how many as we go.
-        let mut order_only = 0isize;
+        let mut order_only = 0usize;
         if self.lexer.peek_token(LexerToken::PIPE2) {
             loop {
                 let mut in_ = EvalString::new();
@@ -321,87 +323,105 @@ impl<'a, 'b, 'c> ManifestParser<'a, 'b, 'c> where 'b : 'a, 'c : 'a {
                 order_only += 1;
             }
         }
-        //self.expect_token(LexerToken::NEWLINE)?;
+        self.expect_token(LexerToken::NEWLINE)?;
+        // Bindings on edges are rare, so allocate per-edge envs only when needed.
+        let mut edge_env = None;
+        if self.lexer.peek_token(LexerToken::INDENT) {
+            let mut env = BindingEnv::new_with_parent(Some(self.env.clone()));
+            while {
+                let (key, value) = self.parse_let()?;
+                let evaluated_value = value.evaluate(&env);
+                env.add_binding(&key, &evaluated_value);
+                self.lexer.peek_token(LexerToken::INDENT)
+            } {}
+            edge_env = Some(Rc::new(RefCell::new(env)));
+        }
+        
+        let env = edge_env.as_ref().unwrap_or(&self.env).clone();
+
+        let mut edge_idx = self.state.edge_state.make_edge(rule, self.state.bindings.clone());
+        let mut edge_revoked = false;
+        {
+            let mut edge = self.state.edge_state.get_edge_mut(edge_idx);
+            edge.env = env.clone();
+
+            let pool_name = edge.get_binding(b"pool").into_owned();
+            if !pool_name.is_empty() {
+                let lexer = &self.lexer;
+                let pool = self.state.pool_state.lookup_pool(&pool_name).ok_or_else(|| {
+                    lexer.error(&format!("unknown pool name '{}'", String::from_utf8_lossy(&pool_name)))
+                })?;
+                edge.pool = pool.clone();
+            }
+
+            let e = outs.len();
+            edge.outputs.reserve(e);
+            for (i, o) in outs.iter().enumerate() {
+                let mut path = o.evaluate(&*env.borrow());
+                let lexer = &self.lexer;
+
+                let slash_bits = canonicalize_path(&mut path).map_err(|path_err| {
+                  lexer.error(&path_err)
+                })?;
+
+                let out_node_idx = self.state.node_state.prepare_node(&path, slash_bits);
+                let mut out_node = self.state.node_state.get_node_mut(out_node_idx);
+
+                if !State::connect_edge_to_out_node(edge, edge_idx, out_node, out_node_idx) {
+                  match self.options.dupe_edge_action {
+                    DupeEdgeAction::ERROR => {
+                      return Err(self.lexer.error(
+                        &format!("multiple rules generate {} [-w dupbuild=err]", 
+                        String::from_utf8_lossy(&path))));
+                    },
+                    DupeEdgeAction::WARN => {
+                      if !self.quiet {
+                        warning!(concat!(
+                          "multiple rules generate {}. ",
+                          "builds involving this target will not be correct; ",
+                          "continuing anyway [-w dupbuild=warn]"
+                        ), String::from_utf8_lossy(&path));
+                      }
+                    }
+                  }
+                  if implicit_outs + i >= e {
+                    implicit_outs -= 1;
+                  }
+
+                }
+            }
+            if edge.outputs.is_empty() {
+                // All outputs of the edge are already created by other edges. Don't add
+                // this edge.  Do this check before input nodes are connected to the edge.
+                edge_revoked = true;
+            }
+        }
+        if edge_revoked {
+            self.state.edge_state.revoke_latest_edge(edge_idx);
+            return Ok(());
+        }
+
+        let mut edge = self.state.edge_state.get_edge_mut(edge_idx);
+        
+        edge.implicit_outs = implicit_outs;
+
+        edge.inputs.reserve(ins.len());
+        for i in ins.iter() {
+            let mut path = i.evaluate(&*env.borrow());
+            let lexer = &self.lexer;
+            let slash_bits = canonicalize_path(&mut path).map_err(|path_err| {
+              lexer.error(&path_err)
+            })?;
+
+            let in_node_idx = self.state.node_state.prepare_node(&path, slash_bits);
+            let mut in_node = self.state.node_state.get_node_mut(in_node_idx);
+            State::connect_edge_to_in_node(edge, edge_idx, in_node, in_node_idx);
+        }
+        edge.implicit_deps = implicit;
+        edge.order_only_deps = order_only;
 
 
 /*
-
-
-
-  
-
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  // Bindings on edges are rare, so allocate per-edge envs only when needed.
-  bool has_indent_token = lexer_.PeekToken(Lexer::INDENT);
-  BindingEnv* env = has_indent_token ? new BindingEnv(env_) : env_;
-  while (has_indent_token) {
-    string key;
-    EvalString val;
-    if (!ParseLet(&key, &val, err))
-      return false;
-
-    env->AddBinding(key, val.Evaluate(env_));
-    has_indent_token = lexer_.PeekToken(Lexer::INDENT);
-  }
-
-  Edge* edge = state_->AddEdge(rule);
-  edge->env_ = env;
-
-  string pool_name = edge->GetBinding("pool");
-  if (!pool_name.empty()) {
-    Pool* pool = state_->LookupPool(pool_name);
-    if (pool == NULL)
-      return lexer_.Error("unknown pool name '" + pool_name + "'", err);
-    edge->pool_ = pool;
-  }
-
-  edge->outputs_.reserve(outs.size());
-  for (size_t i = 0, e = outs.size(); i != e; ++i) {
-    string path = outs[i].Evaluate(env);
-    string path_err;
-    uint64_t slash_bits;
-    if (!CanonicalizePath(&path, &slash_bits, &path_err))
-      return lexer_.Error(path_err, err);
-    if (!state_->AddOut(edge, path, slash_bits)) {
-      if (options_.dupe_edge_action_ == kDupeEdgeActionError) {
-        lexer_.Error("multiple rules generate " + path + " [-w dupbuild=err]",
-                     err);
-        return false;
-      } else {
-        if (!quiet_) {
-          Warning("multiple rules generate %s. "
-                  "builds involving this target will not be correct; "
-                  "continuing anyway [-w dupbuild=warn]",
-                  path.c_str());
-        }
-        if (e - i <= static_cast<size_t>(implicit_outs))
-          --implicit_outs;
-      }
-    }
-  }
-  if (edge->outputs_.empty()) {
-    // All outputs of the edge are already created by other edges. Don't add
-    // this edge.  Do this check before input nodes are connected to the edge.
-    state_->edges_.pop_back();
-    delete edge;
-    return true;
-  }
-  edge->implicit_outs_ = implicit_outs;
-
-  edge->inputs_.reserve(ins.size());
-  for (vector<EvalString>::iterator i = ins.begin(); i != ins.end(); ++i) {
-    string path = i->Evaluate(env);
-    string path_err;
-    uint64_t slash_bits;
-    if (!CanonicalizePath(&path, &slash_bits, &path_err))
-      return lexer_.Error(path_err, err);
-    state_->AddIn(edge, path, slash_bits);
-  }
-  edge->implicit_deps_ = implicit;
-  edge->order_only_deps_ = order_only;
-
   if (options_.phony_cycle_action_ == kPhonyCycleActionWarn &&
       edge->maybe_phonycycle_diagnostic()) {
     // CMake 2.8.12.x and 3.0.x incorrectly write phony build statements
@@ -524,12 +544,12 @@ mod parser_test {
     use super::super::state::State;
     use super::super::test::VirtualFileSystem;
 
-    struct ParserTest<'a> {
-        pub state: RefCell<State<'a>>,
+    struct ParserTest {
+        pub state: RefCell<State>,
         pub fs: VirtualFileSystem,
     }
 
-    impl<'a> ParserTest<'a> {
+    impl ParserTest {
         pub fn new() -> Self {
             ParserTest {
                 state: RefCell::new(State::new()),
