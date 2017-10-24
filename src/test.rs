@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
 
 use super::disk_interface::{FileReader, FileReaderError, DiskInterface};
 
@@ -56,16 +58,29 @@ void VerifyGraph(const State& state);
 /// An implementation of DiskInterface that uses an in-memory representation
 /// of disk state.  It also logs file accesses and directory creations
 /// so it can be used by tests to verify disk access patterns.
+#[derive(Default)]
 pub struct VirtualFileSystem {
+    directories_made: Vec<PathBuf>,
+    pub files_read: RefCell<Vec<PathBuf>>,
+    files: HashMap<PathBuf, VirtualFileSystemEntry>,
+    files_removed: HashSet<PathBuf>,
+    files_created: HashSet<PathBuf>,
     /// A simple fake timestamp for file operations.
     now: isize,
 }
 
+/// An entry for a single in-memory file.
+struct VirtualFileSystemEntry {
+    mtime: isize,
+    stat_error: String, // If mtime is -1.
+    pub contents: Vec<u8>,
+}
+
 impl VirtualFileSystem {
     pub fn new() -> Self {
-        VirtualFileSystem {
-            now: 1
-        }
+        let mut vfs: Self = Default::default();
+        vfs.now = 1isize;
+        vfs
     }
 
     /// Tick "time" forwards; subsequent file operations will be newer than
@@ -74,11 +89,29 @@ impl VirtualFileSystem {
         self.now += 1;
         return self.now;
     }
+
+    /// "Create" a file with contents.
+    pub fn create(&mut self, path: &Path, contents: &[u8]) {
+        self.files.insert(path.to_owned(), VirtualFileSystemEntry {
+          mtime: self.now,
+          stat_error: String::new(),
+          contents: contents.to_owned(),
+        });
+
+        self.files_created.insert(path.to_owned());
+    }
+
 }
 
 impl FileReader for VirtualFileSystem {
-    fn read_file(&self, path: &Path, contents: &mut [u8]) -> Result<(), FileReaderError> {
-        unimplemented!()
+    fn read_file(&self, path: &Path, contents: &mut Vec<u8>) -> Result<(), FileReaderError> {
+        self.files_read.borrow_mut().push(path.to_owned());
+        if let Some(file_contents) = self.files.get(path) {
+            *contents = file_contents.contents.clone();
+            Ok(())
+        } else {
+            Err(FileReaderError::NotFound("No such file or directory".to_owned()))
+        }
     }
 }
 
@@ -91,8 +124,6 @@ impl DiskInterface for VirtualFileSystem {
 
 struct VirtualFileSystem : public DiskInterface {
 
-  /// "Create" a file with contents.
-  void Create(const string& path, const string& contents);
 
   // DiskInterface
   virtual TimeStamp Stat(const string& path, string* err) const;
@@ -270,19 +301,6 @@ bool VirtualFileSystem::WriteFile(const string& path, const string& contents) {
 bool VirtualFileSystem::MakeDir(const string& path) {
   directories_made_.push_back(path);
   return true;  // success
-}
-
-FileReader::Status VirtualFileSystem::ReadFile(const string& path,
-                                               string* contents,
-                                               string* err) {
-  files_read_.push_back(path);
-  FileMap::iterator i = files_.find(path);
-  if (i != files_.end()) {
-    *contents = i->second.contents;
-    return Okay;
-  }
-  *err = strerror(ENOENT);
-  return NotFound;
 }
 
 int VirtualFileSystem::RemoveFile(const string& path) {

@@ -2,6 +2,14 @@ extern crate cc;
 
 fn main() {
     use cc::Build;
+    Build::new()
+        .cpp(true)
+        .file("src/edit_distance.cc")
+        .file("src/metrics.cc")        
+        .file("src/util.cc")        
+        .include("src")
+        .compile("ninja_util");
+    return;
 
     Build::new()
         .cpp(true)

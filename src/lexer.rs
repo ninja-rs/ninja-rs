@@ -18,7 +18,7 @@ use nom::{IResult, Offset};
 use super::eval_env::EvalString;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
-pub enum Token {
+pub enum LexerToken {
     ERROR,
     BUILD,
     COLON,
@@ -36,41 +36,40 @@ pub enum Token {
     TEOF,
 }
 
-impl Token {
+impl LexerToken {
 
     /// Return a human-readable form of a token, used in error messages.
     pub fn name(&self) -> &'static str {
         match *self {
-            Token::ERROR     => "lexing error",
-            Token::BUILD     => "'build'",
-            Token::COLON     => "':'",
-            Token::DEFAULT   => "'default'",
-            Token::EQUALS    => "'='",
-            Token::IDENT     => "identifier",
-            Token::INCLUDE   => "'include'",
-            Token::INDENT    => "indent",
-            Token::NEWLINE   => "newline",
-            Token::PIPE2     => "'||'",
-            Token::PIPE      => "'|'",
-            Token::POOL      => "'pool'",
-            Token::RULE      => "'rule'",
-            Token::SUBNINJA  => "'subninja'",
-            Token::TEOF      => "eof",
+            LexerToken::ERROR     => "lexing error",
+            LexerToken::BUILD     => "'build'",
+            LexerToken::COLON     => "':'",
+            LexerToken::DEFAULT   => "'default'",
+            LexerToken::EQUALS    => "'='",
+            LexerToken::IDENT     => "identifier",
+            LexerToken::INCLUDE   => "'include'",
+            LexerToken::INDENT    => "indent",
+            LexerToken::NEWLINE   => "newline",
+            LexerToken::PIPE2     => "'||'",
+            LexerToken::PIPE      => "'|'",
+            LexerToken::POOL      => "'pool'",
+            LexerToken::RULE      => "'rule'",
+            LexerToken::SUBNINJA  => "'subninja'",
+            LexerToken::TEOF      => "eof",
         }
     }
 
     /// Return a human-readable token hint, used in error messages.
     pub fn error_hint(&self) -> &'static str {
         match *self {
-            Token::COLON => " ($ also escapes ':')",
+            LexerToken::COLON => " ($ also escapes ':')",
             _ => "",
         }
     }
 
 }
 
-
-pub struct Lexer<'a, 'b: 'a> {
+pub struct Lexer<'a, 'b> {
     filename: &'a OsStr,
     input: &'b [u8],
     last_token_offset: usize,
@@ -117,28 +116,23 @@ fn is_sp_char(c: u8) -> bool {
     c == b' '
 }
 
-impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
-    pub fn new() -> Self {
-        lazy_static! {
-            static ref EMPTY_FILENAME: OsString = OsString::new();
-        }
-        static EMPTY_DATA: [u8; 0] = [];
+impl<'a, 'b> Lexer<'a, 'b> {
+    pub fn new(filename: &'a OsStr, input: &'b [u8]) -> Self {
         Lexer {
-            filename: &EMPTY_FILENAME,
-            input: &EMPTY_DATA,
+            filename: filename,
+            input: input,
             last_token_offset: 0,
             offset: 0,
         }
     }
 
     /// Helper ctor useful for tests.
+    #[cfg(test)]
     pub(crate) fn new_with_input(input: &'b [u8]) -> Self {
         lazy_static! {
             static ref FAKE_FILENAME: OsString = "input".into();
         }
-        let mut lexer = Lexer::new();
-        lexer.start(&FAKE_FILENAME, input);
-        lexer
+        Lexer::new(&FAKE_FILENAME, input)
     }
 
     /// If the last token read was an ERROR token, provide more info
@@ -151,16 +145,8 @@ impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
         }
     }
 
-    /// Start parsing some input.
-    pub fn start(&mut self, filename: &'a OsStr, input: &'b [u8]) {
-        self.filename = filename;
-        self.input = input;
-        self.offset = 0;
-        self.last_token_offset = 0;
-    }
-
-    /// Read a Token from the Token enum.
-    pub fn read_token(&mut self) -> Token {
+    /// Read a LexerToken from the LexerToken enum.
+    pub fn read_token(&mut self) -> LexerToken {
         let mut rest_input = &self.input[self.offset..];
 
         named!(skip_comment<&[u8], ()>,
@@ -172,29 +158,29 @@ impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
                 (),
                 |_, _| ()));
 
-        named!(read_one_token<&[u8], Token>,
+        named!(read_one_token<&[u8], LexerToken>,
             alt_complete!(
-                value!(Token::NEWLINE, 
+                value!(LexerToken::NEWLINE, 
                     preceded!(take_while!(is_sp_char),
                         preceded!(opt!(char!('\r')), char!('\n')))) |
-                value!(Token::INDENT, take_while1!(is_sp_char)) |
-                value!(Token::BUILD, tag!("build")) |
-                value!(Token::POOL, tag!("pool")) |
-                value!(Token::RULE, tag!("rule")) |
-                value!(Token::DEFAULT, tag!("default")) |
-                value!(Token::EQUALS, tag!("=")) |
-                value!(Token::COLON, tag!(":")) |
-                value!(Token::PIPE2, tag!("||")) |
-                value!(Token::PIPE, tag!("|")) |
-                value!(Token::INCLUDE, tag!("include")) |
-                value!(Token::SUBNINJA, tag!("subninja")) |
-                value!(Token::IDENT, take_while1!(is_varname_char)) |
-                value!(Token::TEOF, char!('\0')) |
-                value!(Token::ERROR, take!(1)) |
-                value!(Token::TEOF, eof!())
+                value!(LexerToken::INDENT, take_while1!(is_sp_char)) |
+                value!(LexerToken::BUILD, tag!("build")) |
+                value!(LexerToken::POOL, tag!("pool")) |
+                value!(LexerToken::RULE, tag!("rule")) |
+                value!(LexerToken::DEFAULT, tag!("default")) |
+                value!(LexerToken::EQUALS, tag!("=")) |
+                value!(LexerToken::COLON, tag!(":")) |
+                value!(LexerToken::PIPE2, tag!("||")) |
+                value!(LexerToken::PIPE, tag!("|")) |
+                value!(LexerToken::INCLUDE, tag!("include")) |
+                value!(LexerToken::SUBNINJA, tag!("subninja")) |
+                value!(LexerToken::IDENT, take_while1!(is_varname_char)) |
+                value!(LexerToken::TEOF, char!('\0')) |
+                value!(LexerToken::ERROR, take!(1)) |
+                value!(LexerToken::TEOF, eof!())
                 ));
 
-        let token : Token;
+        let token : LexerToken;
 
         match skip_comment(rest_input) {
             IResult::Done(i, _) => {
@@ -220,20 +206,20 @@ impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
         self.offset = self.input.offset(rest_input);
 
         match token {
-            Token::NEWLINE | Token::TEOF => {},
+            LexerToken::NEWLINE | LexerToken::TEOF => {},
             _ => { self.eat_whitespace(); },
         }
 
         return token;
     }
 
-    /// Rewind to the last read Token.
+    /// Rewind to the last read LexerToken.
     pub fn unread_token(&mut self) {
         self.offset = self.last_token_offset;
     }
 
     /// If the next token is \a token, read it and return true.
-    pub fn peek_token(&mut self, token: Token) -> bool {
+    pub fn peek_token(&mut self, token: LexerToken) -> bool {
         let t = self.read_token();
         if t == token {
             return true;
@@ -467,7 +453,7 @@ fn test_lexer_comment_eof() {
     // mid-comment.
     let mut lexer = Lexer::new_with_input(b"# foo");
     let token = lexer.read_token();
-    assert_eq!(Token::ERROR, token);
+    assert_eq!(LexerToken::ERROR, token);
 }
 
 
@@ -477,8 +463,8 @@ fn test_lexer_tabs() {
     let mut lexer = Lexer::new_with_input(b"   \tfoobar");
     let mut token;
     token = lexer.read_token();
-    assert_eq!(Token::INDENT, token);
+    assert_eq!(LexerToken::INDENT, token);
     token = lexer.read_token();
-    assert_eq!(Token::ERROR, token);
+    assert_eq!(LexerToken::ERROR, token);
     assert_eq!("tabs are not allowed, use spaces", lexer.describe_last_error());
 }

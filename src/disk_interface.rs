@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::path::Path;
+use std::fs::File;
+use std::io::{Read, ErrorKind};
 
 /// Result of ReadFile.
 pub enum FileReaderError {
@@ -25,7 +27,7 @@ pub enum FileReaderError {
 pub trait FileReader {
     /// Read and store in given string.  On success, return Okay.
     /// On error, return another Status and fill |err|.
-    fn read_file(&self, path: &Path, contents: &mut [u8]) -> Result<(), FileReaderError>;
+    fn read_file(&self, path: &Path, contents: &mut Vec<u8>) -> Result<(), FileReaderError>;
 }
 
 /// Interface for accessing the disk.
@@ -104,8 +106,21 @@ struct RealDiskInterface : public DiskInterface {
 */
 
 impl FileReader for RealDiskInterface {
-    fn read_file(&self, path: &Path, contents: &mut [u8]) -> Result<(), FileReaderError> {
-        unimplemented!()
+    fn read_file(&self, path: &Path, contents: &mut Vec<u8>) -> Result<(), FileReaderError> {
+        let mut file = File::open(path).map_err(|err| {
+            let c = if err.kind() == ErrorKind::NotFound {
+                FileReaderError::NotFound
+            } else {
+                FileReaderError::OtherError
+            };
+            c(format!("{}", err))
+        })?;
+
+        file.read_to_end(contents).map_err(|err| {
+            FileReaderError::OtherError(format!("{}", err))
+        })?;
+
+        Ok(())
     }
 }
 

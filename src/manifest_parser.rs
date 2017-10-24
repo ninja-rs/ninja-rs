@@ -15,29 +15,29 @@
 use std::rc::Rc;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ffi::{OsString, OsStr};
 
-use super::lexer::Lexer;
-use super::lexer::Token as LexerToken;
+use super::lexer::{Lexer, LexerToken};
 use super::state::{State, Pool};
 use super::eval_env::{BindingEnv, EvalString, Rule};
-use super::disk_interface::FileReader;
+use super::disk_interface::{FileReaderError, FileReader};
 use super::version::check_ninja_version;
-use super::utils::canonicalize_path;
+use super::utils::{canonicalize_path, pathbuf_from_bytes};
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum DupeEdgeAction {
     WARN,
     ERROR,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum PhonyCycleAction {
     WARN,
     ERROR,
 }
 
+#[derive(Clone)]
 pub struct ManifestParserOptions {
     pub dupe_edge_action: DupeEdgeAction,
     pub phony_cycle_action: PhonyCycleAction,
@@ -52,31 +52,35 @@ impl ManifestParserOptions {
 impl Default for ManifestParserOptions {
     fn default() -> Self {
         ManifestParserOptions {
-            dupe_edge_action: DupeEdgeAction::ERROR,
-            phony_cycle_action: PhonyCycleAction::ERROR,
+            dupe_edge_action: DupeEdgeAction::WARN,
+            phony_cycle_action: PhonyCycleAction::WARN,
         }
     }
 }
 
 /// Parses .ninja files.
-pub struct ManifestParser<'a, 'c : 'a> {
+pub struct ManifestParser<'a> {
     state: &'a mut State,
     env: Rc<RefCell<BindingEnv>>,
     file_reader: &'a FileReader,
-    lexer: Lexer<'a, 'c>,
     options: ManifestParserOptions,
     quiet: bool
 }
 
-impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
-    pub fn new(state: &'a mut State, file_reader: &'a FileReader, options: ManifestParserOptions) -> Self {
+impl<'a> ManifestParser<'a> {
+    pub fn new(state: &'a mut State, file_reader: &'a FileReader, 
+        options: ManifestParserOptions) -> Self {
         let env = state.get_env();
+        Self::new_with_env(state, file_reader, options, env)
+    }
+
+    pub fn new_with_env(state: &'a mut State, file_reader: &'a FileReader, 
+        options: ManifestParserOptions, env: Rc<RefCell<BindingEnv>>) -> Self {
         ManifestParser {
             state,
-            env: env,
+            env,
             file_reader,
             options,
-            lexer: Lexer::new(),
             quiet: false
         }
     }
@@ -87,32 +91,36 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
     }
 
     pub fn load_with_parent(&mut self, filename: &Path, parent: Option<&Lexer>) -> Result<(), String> {
-/*
-  METRIC_RECORD(".ninja parse");
-  string contents;
-  string read_err;
-  if (file_reader_->ReadFile(filename, &contents, &read_err) != FileReader::Okay) {
-    *err = "loading '" + filename + "': " + read_err;
-    if (parent)
-      parent->Error(string(*err), err);
-    return false;
-  }
+        metric_record!(".ninja parse");
+        let mut contents = Vec::new();
+        let read_result = self.file_reader.read_file(filename, &mut contents);
+        if let Err(read_err) = read_result {
+            let read_err_text = match read_err {
+            FileReaderError::NotFound(r) => r,
+            FileReaderError::OtherError(r) => r,
+            };
+            let mut err = format!("loading '{}': {}", filename.to_string_lossy(), read_err_text);
+            if let Some(lexer) = parent {
+                err = lexer.error(&err)
+            }
+            return Err(err);
+        }
 
-  // The lexer needs a nul byte at the end of its input, to know when it's done.
-  // It takes a StringPiece, and StringPiece's string constructor uses
-  // string::data().  data()'s return value isn't guaranteed to be
-  // null-terminated (although in practice - libc++, libstdc++, msvc's stl --
-  // it is, and C++11 demands that too), so add an explicit nul byte.
-  contents.resize(contents.size() + 1);
+        // Notes from C++ version:
 
-  return Parse(filename, contents, err);
-*/
-        unimplemented!{}
+        // The lexer needs a nul byte at the end of its input, to know when it's done.
+        // It takes a StringPiece, and StringPiece's string constructor uses
+        // string::data().  data()'s return value isn't guaranteed to be
+        // null-terminated (although in practice - libc++, libstdc++, msvc's stl --
+        // it is, and C++11 demands that too), so add an explicit nul byte.
+
+        // in rust version we've eliminated such needs, so do nothing here.
+        return self.parse(filename.as_os_str(), &contents);
     }
 
     /// Parse a text string of input.  Used by tests.
     #[cfg(test)]
-    pub(crate) fn parse_test(&mut self, input: &'c [u8]) -> Result<(), String> {
+    pub(crate) fn parse_test(&mut self, input: &[u8]) -> Result<(), String> {
         lazy_static! {
             static ref FAKE_FILENAME : OsString = OsString::from("input");
         }
@@ -121,26 +129,26 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
     }
 
     /// Parse a file, given its contents as a string.
-    pub fn parse(&mut self, filename: &'a OsStr, input: &'c [u8]) -> Result<(), String> {
-        self.lexer.start(filename, input);
+    pub fn parse(&mut self, filename: &OsStr, input: &[u8]) -> Result<(), String> {
+        let mut lexer = Lexer::new(filename, input);
         loop {
-            let token = self.lexer.read_token();
+            let token = lexer.read_token();
             match token {
               LexerToken::POOL => {
-                  self.parse_pool()?;
+                  self.parse_pool(&mut lexer)?;
               },
               LexerToken::BUILD => {
-                  self.parse_edge()?;
+                  self.parse_edge(&mut lexer)?;
               },
               LexerToken::RULE => {
-                  self.parse_rule()?;
+                  self.parse_rule(&mut lexer)?;
               },
               LexerToken::DEFAULT => {
-                  self.parse_default()?;
+                  self.parse_default(&mut lexer)?;
               },
               LexerToken::IDENT => {
-                  self.lexer.unread_token();
-                  let (name, let_value) = self.parse_let()?;
+                  lexer.unread_token();
+                  let (name, let_value) = self.parse_let(&mut lexer)?;
                   let value = let_value.evaluate(&self.env.borrow() as &BindingEnv);
                   // Check ninja_required_version immediately so we can exit
                   // before encountering any syntactic surprises.
@@ -150,13 +158,13 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
                   self.env.borrow_mut().add_binding(&name, &value);
               },
               LexerToken::INCLUDE => {
-                  self.parse_file_include(false)?;
+                  self.parse_file_include(&mut lexer, false)?;
               },
               LexerToken::SUBNINJA => {
-                  self.parse_file_include(true)?;
+                  self.parse_file_include(&mut lexer, true)?;
               },
               LexerToken::ERROR => {
-                  return Err(self.lexer.error(self.lexer.describe_last_error()));
+                  return Err(lexer.error(lexer.describe_last_error()));
               },
               LexerToken::TEOF => {
                   return Ok(());
@@ -165,90 +173,90 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
                   ()
               },
               _ => {
-                  return Err(self.lexer.error(&format!("unexpected {}", token.name())));
+                  return Err(lexer.error(&format!("unexpected {}", token.name())));
               }
             }
         }
     }
 
     /// Parse various statement types.
-    fn parse_pool(&mut self) -> Result<(), String> {
-        let name = self.lexer.read_ident("expected pool name")?.to_owned();
-        self.expect_token(LexerToken::NEWLINE)?;
+    fn parse_pool(&mut self, lexer: &mut Lexer) -> Result<(), String> {
+        let name = lexer.read_ident("expected pool name")?.to_owned();
+        self.expect_token(lexer, LexerToken::NEWLINE)?;
         if self.state.pool_state.lookup_pool(&name).is_some() {
-            return Err(self.lexer.error(&format!("duplicate pool '{}'", String::from_utf8_lossy(&name))));
+            return Err(lexer.error(&format!("duplicate pool '{}'", String::from_utf8_lossy(&name))));
         }
 
         let mut depth = None;
-        while self.lexer.peek_token(LexerToken::INDENT) {
-            let (key, value) = self.parse_let()?;
+        while lexer.peek_token(LexerToken::INDENT) {
+            let (key, value) = self.parse_let(lexer)?;
 
             if key != b"depth" {
-                return Err(self.lexer.error(&format!("unexpected variable '{}'", String::from_utf8_lossy(&key))))
+                return Err(lexer.error(&format!("unexpected variable '{}'", String::from_utf8_lossy(&key))))
             }
 
             let depth_string = value.evaluate(&self.env.borrow() as &BindingEnv);
             let depth_value = String::from_utf8_lossy(&depth_string).parse::<isize>().ok()
                         .and_then(|v| if v >= 0 { Some(v) } else { None });
             if depth_value.is_none() {
-                return Err(self.lexer.error("invalid pool depth"));
+                return Err(lexer.error("invalid pool depth"));
             }
             depth = depth_value;
         }
 
-        let depth = depth.ok_or_else(|| { self.lexer.error("expected 'depth =' line") })?;
+        let depth = depth.ok_or_else(|| { lexer.error("expected 'depth =' line") })?;
 
         self.state.pool_state.add_pool(Rc::new(RefCell::new(Pool::new(name, depth))));
         Ok(())
     }
 
-    fn parse_rule(&mut self) -> Result<(), String> {
-        let name = self.lexer.read_ident("expected rule name")?.to_owned();
+    fn parse_rule(&mut self, lexer: &mut Lexer) -> Result<(), String> {
+        let name = lexer.read_ident("expected rule name")?.to_owned();
 
-        self.expect_token(LexerToken::NEWLINE)?;
+        self.expect_token(lexer, LexerToken::NEWLINE)?;
 
         if self.env.borrow().lookup_rule_current_scope(&name).is_some() {
-            return Err(self.lexer.error(&format!("duplicate rule '{}'", String::from_utf8_lossy(&name))))
+            return Err(lexer.error(&format!("duplicate rule '{}'", String::from_utf8_lossy(&name))))
         }
         let mut rule = Rule::new(name);
-        while self.lexer.peek_token(LexerToken::INDENT) {
-            let (key, value) = self.parse_let()?;
+        while lexer.peek_token(LexerToken::INDENT) {
+            let (key, value) = self.parse_let(lexer)?;
             if Rule::is_reserved_binding(&key) {
                 rule.add_binding(&key, &value);
             } else {
                 // Die on other keyvals for now; revisit if we want to add a
                 // scope here.
-                return Err(self.lexer.error(&format!("unexpected variable '{}'", String::from_utf8_lossy(&key))));
+                return Err(lexer.error(&format!("unexpected variable '{}'", String::from_utf8_lossy(&key))));
             }
         }
         if rule.bindings.get(b"rspfile".as_ref()).is_none() !=
             rule.bindings.get(b"rspfile_content".as_ref()).is_none() {
-            return Err(self.lexer.error("rspfile and rspfile_content need to be both specified")); 
+            return Err(lexer.error("rspfile and rspfile_content need to be both specified")); 
         }
 
         if rule.bindings.get(b"command".as_ref()).is_none() {
-            return Err(self.lexer.error("expected 'command =' line"));
+            return Err(lexer.error("expected 'command =' line"));
         }
 
         self.env.borrow_mut().add_rule(Rc::new(rule));
         return Ok(());
     }
 
-    fn parse_let(&mut self) -> Result<(Vec<u8>, EvalString), String> {
-        let key = self.lexer.read_ident("expected variable name")?.to_owned();
-        self.expect_token(LexerToken::EQUALS)?;
+    fn parse_let(&mut self, lexer: &mut Lexer) -> Result<(Vec<u8>, EvalString), String> {
+        let key = lexer.read_ident("expected variable name")?.to_owned();
+        self.expect_token(lexer, LexerToken::EQUALS)?;
         let mut value = EvalString::new();
-        self.lexer.read_var_value(&mut value)?;
+        lexer.read_var_value(&mut value)?;
         Ok((key, value))
     }
 
-    fn parse_edge(&mut self) -> Result<(), String> {
+    fn parse_edge(&mut self, lexer: &mut Lexer) -> Result<(), String> {
         let mut ins = Vec::new();
         let mut outs = Vec::new();
 
         loop {
             let mut out = EvalString::new();
-            self.lexer.read_path(&mut out)?;
+            lexer.read_path(&mut out)?;
 
             if out.is_empty() {
                 break;
@@ -258,10 +266,10 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
 
         // Add all implicit outs, counting how many as we go.
         let mut implicit_outs = 0usize;
-        if self.lexer.peek_token(LexerToken::PIPE) {
+        if lexer.peek_token(LexerToken::PIPE) {
             loop {
                 let mut out = EvalString::new();
-                self.lexer.read_path(&mut out)?;
+                lexer.read_path(&mut out)?;
 
                 if out.is_empty() {
                     break;
@@ -272,23 +280,23 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
         }
 
         if outs.is_empty() {
-            return Err(self.lexer.error("expected path"));
+            return Err(lexer.error("expected path"));
         }
 
-        self.expect_token(LexerToken::COLON)?;
+        self.expect_token(lexer, LexerToken::COLON)?;
 
         let rule = {
-            let rule_name = self.lexer.read_ident("expected build command name")?.to_owned();
+            let rule_name = lexer.read_ident("expected build command name")?.to_owned();
             let rule = self.env.borrow().lookup_rule(&rule_name).map(Cow::into_owned);
             rule.ok_or_else(|| {
-                self.lexer.error(&format!("unknown build rule '{}'", String::from_utf8_lossy(&rule_name)))
+                lexer.error(&format!("unknown build rule '{}'", String::from_utf8_lossy(&rule_name)))
             })?
         };
 
         loop {
             // XXX should we require one path here?
             let mut in_ = EvalString::new();
-            self.lexer.read_path(&mut in_)?;
+            lexer.read_path(&mut in_)?;
 
             if in_.is_empty() {
                 break;
@@ -298,10 +306,10 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
 
         // Add all implicit deps, counting how many as we go.
         let mut implicit = 0usize;
-        if self.lexer.peek_token(LexerToken::PIPE) {
+        if lexer.peek_token(LexerToken::PIPE) {
             loop {
                 let mut in_ = EvalString::new();
-                self.lexer.read_path(&mut in_)?;
+                lexer.read_path(&mut in_)?;
 
                 if in_.is_empty() {
                     break;
@@ -313,10 +321,10 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
 
         // Add all order-only deps, counting how many as we go.
         let mut order_only = 0usize;
-        if self.lexer.peek_token(LexerToken::PIPE2) {
+        if lexer.peek_token(LexerToken::PIPE2) {
             loop {
                 let mut in_ = EvalString::new();
-                self.lexer.read_path(&mut in_)?;
+                lexer.read_path(&mut in_)?;
 
                 if in_.is_empty() {
                     break;
@@ -325,16 +333,16 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
                 order_only += 1;
             }
         }
-        self.expect_token(LexerToken::NEWLINE)?;
+        self.expect_token(lexer, LexerToken::NEWLINE)?;
         // Bindings on edges are rare, so allocate per-edge envs only when needed.
         let mut edge_env = None;
-        if self.lexer.peek_token(LexerToken::INDENT) {
+        if lexer.peek_token(LexerToken::INDENT) {
             let mut env = BindingEnv::new_with_parent(Some(self.env.clone()));
             while {
-                let (key, value) = self.parse_let()?;
+                let (key, value) = self.parse_let(lexer)?;
                 let evaluated_value = value.evaluate(&env);
                 env.add_binding(&key, &evaluated_value);
-                self.lexer.peek_token(LexerToken::INDENT)
+                lexer.peek_token(LexerToken::INDENT)
             } {}
             edge_env = Some(Rc::new(RefCell::new(env)));
         }
@@ -349,7 +357,6 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
 
             let pool_name = edge.get_binding(b"pool").into_owned();
             if !pool_name.is_empty() {
-                let lexer = &self.lexer;
                 let pool = self.state.pool_state.lookup_pool(&pool_name).ok_or_else(|| {
                     lexer.error(&format!("unknown pool name '{}'", String::from_utf8_lossy(&pool_name)))
                 })?;
@@ -360,8 +367,6 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
             edge.outputs.reserve(e);
             for (i, o) in outs.iter().enumerate() {
                 let mut path = o.evaluate(&*env.borrow());
-                let lexer = &self.lexer;
-
                 let slash_bits = canonicalize_path(&mut path).map_err(|path_err| {
                   lexer.error(&path_err)
                 })?;
@@ -372,7 +377,7 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
                 if !State::connect_edge_to_out_node(edge, edge_idx, out_node, out_node_idx) {
                   match self.options.dupe_edge_action {
                     DupeEdgeAction::ERROR => {
-                      return Err(self.lexer.error(
+                      return Err(lexer.error(
                         &format!("multiple rules generate {} [-w dupbuild=err]", 
                         String::from_utf8_lossy(&path))));
                     },
@@ -403,20 +408,20 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
             return Ok(());
         }
 
-        let mut edge = self.state.edge_state.get_edge_mut(edge_idx);
+        let edge = self.state.edge_state.get_edge_mut(edge_idx);
         
         edge.implicit_outs = implicit_outs;
 
         edge.inputs.reserve(ins.len());
         for i in ins.iter() {
             let mut path = i.evaluate(&*env.borrow());
-            let lexer = &self.lexer;
+            let lexer = &lexer;
             let slash_bits = canonicalize_path(&mut path).map_err(|path_err| {
               lexer.error(&path_err)
             })?;
 
             let in_node_idx = self.state.node_state.prepare_node(&path, slash_bits);
-            let mut in_node = self.state.node_state.get_node_mut(in_node_idx);
+            let in_node = self.state.node_state.get_node_mut(in_node_idx);
             State::connect_edge_to_in_node(edge, edge_idx, in_node, in_node_idx);
         }
         edge.implicit_deps = implicit;
@@ -434,10 +439,10 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
             while i != edge.inputs.len() {
               if edge.inputs[i] == out_node_idx {
                 edge.inputs.remove(i);
-                i -= 1;
                 modified = true;
+              } else {
+                i += 1;
               }
-              i += 1;
             }
             if modified && !self.quiet {
               let out_node = self.state.node_state.get_node(out_node_idx);
@@ -449,7 +454,7 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
         // Multiple outputs aren't (yet?) supported with depslog.
         let deps_type = edge.get_binding(b"deps");
         if !deps_type.is_empty() && edge.outputs.len() > 1 {
-            return Err(self.lexer.error(
+            return Err(lexer.error(
                 concat!(
                   "multiple outputs aren't (yet?) supported by depslog; ",
                   "bring this up on the mailing list if it affects you")));
@@ -457,24 +462,68 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
         Ok(())
     }
 
-    fn parse_default(&mut self) -> Result<(), String> {
-        unimplemented!()
+    fn parse_default(&mut self, lexer: &mut Lexer) -> Result<(), String> {
+        let mut any = false;
+
+        loop {
+            let mut eval = EvalString::new();
+            lexer.read_path(&mut eval)?;
+
+            if eval.is_empty() {
+                break;
+            };
+
+            any = true;
+
+            let mut path = eval.evaluate(&*self.env.borrow());
+            let _ = canonicalize_path(&mut path).map_err(|e| lexer.error(&e))?;
+            self.state.add_default(&path).map_err(|e| lexer.error(&e))?;
+        }
+
+        if !any {
+            return Err(lexer.error("expected target name"));
+        }
+        
+        self.expect_token(lexer, LexerToken::NEWLINE)?;
+
+        Ok(())
     }
 
     /// Parse either a 'subninja' or 'include' line.
-    fn parse_file_include(&mut self, new_scope: bool) -> Result<(), String> {
-        unimplemented!()
+    fn parse_file_include(&mut self, lexer: &mut Lexer, new_scope: bool) -> Result<(), String> {
+        let mut eval = EvalString::new();
+        lexer.read_path(&mut eval)?;
+        let path = eval.evaluate(&*self.env.borrow());
+
+        let env = if new_scope {
+            Rc::new(RefCell::new(BindingEnv::new_with_parent(Some(self.env.clone()))))
+        } else {
+            self.env.clone()
+        };
+        {
+            let mut subparser = ManifestParser::new_with_env(self.state, self.file_reader, self.options.clone(), env);
+
+            let path = pathbuf_from_bytes(path).map_err(|_| {
+                lexer.error("invalid utf8 filename")
+            })?;
+
+            subparser.load_with_parent(&path, Some(&lexer))?;
+        }
+
+        self.expect_token(lexer, LexerToken::NEWLINE)?;
+
+        Ok(())
     }
 
     /// If the next token is not \a expected, produce an error string
     /// saying "expectd foo, got bar".
-    fn expect_token(&mut self, expected: LexerToken) -> Result<(), String> {
-        let token = self.lexer.read_token();
+    fn expect_token(&mut self, lexer: &mut Lexer, expected: LexerToken) -> Result<(), String> {
+        let token = lexer.read_token();
         if token == expected {
             Ok(())
         } else {
             let message = format!("expected {}, got {}{}", expected.name(), token.name(), expected.error_hint());
-            Err(self.lexer.error(&message))
+            Err(lexer.error(&message))
         }
     }
 
@@ -488,55 +537,14 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
 
 
 bool ManifestParser::ParseDefault(string* err) {
-  EvalString eval;
-  if (!lexer_.ReadPath(&eval, err))
-    return false;
-  if (eval.empty())
-    return lexer_.Error("expected target name", err);
 
-  do {
-    string path = eval.Evaluate(env_);
-    string path_err;
-    uint64_t slash_bits;  // Unused because this only does lookup.
-    if (!CanonicalizePath(&path, &slash_bits, &path_err))
-      return lexer_.Error(path_err, err);
-    if (!state_->AddDefault(path, &path_err))
-      return lexer_.Error(path_err, err);
-
-    eval.Clear();
-    if (!lexer_.ReadPath(&eval, err))
-      return false;
-  } while (!eval.empty());
-
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  return true;
 }
 
 bool ManifestParser::ParseEdge(string* err) {
 }
 
 bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
-  EvalString eval;
-  if (!lexer_.ReadPath(&eval, err))
-    return false;
-  string path = eval.Evaluate(env_);
 
-  ManifestParser subparser(state_, file_reader_, options_);
-  if (new_scope) {
-    subparser.env_ = new BindingEnv(env_);
-  } else {
-    subparser.env_ = env_;
-  }
-
-  if (!subparser.Load(path, err, &lexer_))
-    return false;
-
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  return true;
 }
 
 */
@@ -544,6 +552,7 @@ bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
 #[cfg(test)]
 mod parser_test {
     use super::*;
+    use super::super::eval_env::Env;
     use super::super::state::State;
     use super::super::test::VirtualFileSystem;
 
@@ -560,14 +569,31 @@ mod parser_test {
             }
         }
 
-        pub fn assert_parse(&mut self, input: &[u8]) -> () {
+        pub fn assert_parse_with_options(&mut self, input: &[u8], 
+            options: ManifestParserOptions) -> () {
+            let mut state = self.state.borrow_mut();
             {
-              let mut state = self.state.borrow_mut();
-              let mut parser = ManifestParser::new(&mut state, 
-                &self.fs, Default::default());
-              assert_eq!(Ok(()), parser.parse_test(input));
+                let mut parser = ManifestParser::new(&mut state, &self.fs, options);
+                assert_eq!(Ok(()), parser.parse_test(input));
             }
-            assert_eq!((), self.state.borrow().verify_graph());
+              
+            assert_eq!((), state.verify_graph());
+        }
+
+        pub fn assert_parse_with_options_error(&mut self, input: &[u8], 
+            options: ManifestParserOptions, err: &str) -> () {
+            let mut state = self.state.borrow_mut();
+            let mut parser = ManifestParser::new(&mut state, &self.fs, options);
+            assert_eq!(Err(err.to_owned()), parser.parse_test(input));
+        }
+
+
+        pub fn assert_parse(&mut self, input: &[u8]) -> () {
+            self.assert_parse_with_options(input, Default::default());
+        }
+
+        pub fn assert_parse_error(&mut self, input: &[u8], err: &str) -> () {
+            self.assert_parse_with_options_error(input, Default::default(), err);
         }
     }
 
@@ -641,42 +667,50 @@ mod parser_test {
         assert_eq!(false, edge.get_binding_bool(b"generator"));
     }
 
+    #[test]
+    fn parsertest_ignore_indented_blank_lines() {
+        // the indented blanks used to cause parse errors
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "  \n",
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "  \n",
+            "build result: cat in_1.cc in-2.O\n",
+            "  \n",
+            "variable=1\n").as_bytes());
+        
+        // the variable must be in the top level environment
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(b"1".as_ref(), bindings.lookup_variable(b"variable").as_ref());
+    }
 
+    #[test]
+    fn parsertest_response_files() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "rule cat_rsp\n",
+          "  command = cat $rspfile > $out\n",
+          "  rspfile = $rspfile\n",
+          "  rspfile_content = $in\n",
+          "\n",
+          "build out: cat_rsp in\n",
+          "  rspfile=out.rsp\n").as_bytes());
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(2usize, bindings.get_rules().len());
+        let rule = bindings.get_rules().iter().next().unwrap().1;
+        assert_eq!(b"cat_rsp", rule.name());
+        assert_eq!(b"[cat ][$rspfile][ > ][$out]".as_ref().to_owned(), 
+            rule.get_binding(b"command").unwrap().serialize());
+        assert_eq!(b"[$rspfile]".as_ref().to_owned(), 
+            rule.get_binding(b"rspfile").unwrap().serialize());
+        assert_eq!(b"[$in]".as_ref().to_owned(), 
+            rule.get_binding(b"rspfile_content").unwrap().serialize());
+    }
 /*
 
-TEST_F(ParserTest, IgnoreIndentedBlankLines) {
-  // the indented blanks used to cause parse errors
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"  \n"
-"rule cat\n"
-"  command = cat $in > $out\n"
-"  \n"
-"build result: cat in_1.cc in-2.O\n"
-"  \n"
-"variable=1\n"));
-
-  // the variable must be in the top level environment
-  EXPECT_EQ("1", state.bindings_.LookupVariable("variable"));
-}
-
-TEST_F(ParserTest, ResponseFiles) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat_rsp\n"
-"  command = cat $rspfile > $out\n"
-"  rspfile = $rspfile\n"
-"  rspfile_content = $in\n"
-"\n"
-"build out: cat_rsp in\n"
-"  rspfile=out.rsp\n"));
-
-  ASSERT_EQ(2u, state.bindings_.GetRules().size());
-  const Rule* rule = state.bindings_.GetRules().begin()->second;
-  EXPECT_EQ("cat_rsp", rule->name());
-  EXPECT_EQ("[cat ][$rspfile][ > ][$out]",
-            rule->GetBinding("command")->Serialize());
-  EXPECT_EQ("[$rspfile]", rule->GetBinding("rspfile")->Serialize());
-  EXPECT_EQ("[$in]", rule->GetBinding("rspfile_content")->Serialize());
-}
 
 TEST_F(ParserTest, InNewline) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(
@@ -752,22 +786,33 @@ TEST_F(ParserTest, Continuation) {
   EXPECT_EQ("link", rule->name());
   EXPECT_EQ("[foo bar baz]", rule->GetBinding("command")->Serialize());
 }
+*/
 
-TEST_F(ParserTest, Backslash) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"foo = bar\\baz\n"
-"foo2 = bar\\ baz\n"
-));
-  EXPECT_EQ("bar\\baz", state.bindings_.LookupVariable("foo"));
-  EXPECT_EQ("bar\\ baz", state.bindings_.LookupVariable("foo2"));
-}
+    #[test]
+    fn parsertest_backslash() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "foo = bar\\baz\n",
+            "foo2 = bar\\ baz\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(b"bar\\baz".as_ref(), bindings.lookup_variable(b"foo").as_ref());
+        assert_eq!(b"bar\\ baz".as_ref(), bindings.lookup_variable(b"foo2").as_ref());
+    }
 
-TEST_F(ParserTest, Comment) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"# this is a comment\n"
-"foo = not # a comment\n"));
-  EXPECT_EQ("not # a comment", state.bindings_.LookupVariable("foo"));
-}
+    #[test]
+    fn parsertest_comment() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "# this is a comment\n",
+            "foo = not # a comment\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(b"not # a comment".as_ref(), bindings.lookup_variable(b"foo").as_ref());
+    }
+/*
 
 TEST_F(ParserTest, Dollars) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(
@@ -882,30 +927,35 @@ TEST_F(ParserTest, CanonicalizePathsBackslashes) {
   EXPECT_EQ(1, node->slash_bits());
 }
 #endif
+*/
+    #[test]
+    fn parsertest_duplicate_edge_with_multiple_outputs() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "rule cat\n",
+          "  command = cat $in > $out\n",
+          "build out1 out2: cat in1\n",
+          "build out1: cat in2\n",
+          "build final: cat out1\n"
+          ).as_bytes());
+      // AssertParse() checks that the generated build graph is self-consistent.
+      // That's all the checking that this test needs.       
+    }
 
-TEST_F(ParserTest, DuplicateEdgeWithMultipleOutputs) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build out1 out2: cat in1\n"
-"build out1: cat in2\n"
-"build final: cat out1\n"
-));
-  // AssertParse() checks that the generated build graph is self-consistent.
-  // That's all the checking that this test needs.
-}
+    #[test]
+    fn parsertest_no_dead_pointer_from_duplicate_edge() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "rule cat\n",
+          "  command = cat $in > $out\n",
+          "build out: cat in\n",
+          "build out: cat in\n"
+          ).as_bytes());
+      // AssertParse() checks that the generated build graph is self-consistent.
+      // That's all the checking that this test needs.       
+    }
 
-TEST_F(ParserTest, NoDeadPointerFromDuplicateEdge) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build out: cat in\n"
-"build out: cat in\n"
-));
-  // AssertParse() checks that the generated build graph is self-consistent.
-  // That's all the checking that this test needs.
-}
-
+/*
 TEST_F(ParserTest, DuplicateEdgeWithMultipleOutputsError) {
   const char kInput[] =
 "rule cat\n"
@@ -938,40 +988,48 @@ TEST_F(ParserTest, DuplicateEdgeInIncludedFile) {
   EXPECT_EQ("sub.ninja:5: multiple rules generate out1 [-w dupbuild=err]\n",
             err);
 }
+*/
 
-TEST_F(ParserTest, PhonySelfReferenceIgnored) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"build a: phony a\n"
-));
+    #[test]
+    fn parsertest_phony_self_reference_ignored() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "build a: phony a\n").as_bytes());
+        
+        // the variable must be in the top level environment
+        let state = parsertest.state.borrow();
+        let node_a_idx = state.node_state.lookup_node(b"a").unwrap();
+        let node_a_in_edge_idx = state.node_state.get_node(node_a_idx).in_edge().unwrap();
+        assert_eq!(true, state.edge_state.get_edge(node_a_in_edge_idx).inputs.is_empty());
+    }
 
-  Node* node = state.LookupNode("a");
-  Edge* edge = node->in_edge();
-  ASSERT_TRUE(edge->inputs_.empty());
-}
+    #[test]
+    fn parsertest_phony_self_reference_kept() {
+        let mut parsertest = ParserTest::new();
+        let mut parser_opts = ManifestParserOptions::new();
+        parser_opts.phony_cycle_action = PhonyCycleAction::ERROR;
+        parsertest.assert_parse_with_options(concat!(
+            "build a: phony a\n").as_bytes(), parser_opts);
+        
+        // the variable must be in the top level environment
+        let state = parsertest.state.borrow();
+        let node_a_idx = state.node_state.lookup_node(b"a").unwrap();
+        let node_a_in_edge_idx = state.node_state.get_node(node_a_idx).in_edge().unwrap();
+        let edge = state.edge_state.get_edge(node_a_in_edge_idx);
+        assert_eq!(1, edge.inputs.len());
+        assert_eq!(node_a_idx, edge.inputs[0]);
+    }
 
-TEST_F(ParserTest, PhonySelfReferenceKept) {
-  const char kInput[] =
-"build a: phony a\n";
-  ManifestParserOptions parser_opts;
-  parser_opts.phony_cycle_action_ = kPhonyCycleActionError;
-  ManifestParser parser(&state, &fs_, parser_opts);
-  string err;
-  EXPECT_TRUE(parser.ParseTest(kInput, &err));
-  EXPECT_EQ("", err);
-
-  Node* node = state.LookupNode("a");
-  Edge* edge = node->in_edge();
-  ASSERT_EQ(edge->inputs_.size(), 1);
-  ASSERT_EQ(edge->inputs_[0], node);
-}
-
-TEST_F(ParserTest, ReservedWords) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule build\n"
-"  command = rule run $out\n"
-"build subninja: build include default foo.cc\n"
-"default subninja\n"));
-}
+    #[test]
+    fn parsertest_reserved_words() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule build\n",
+            "  command = rule run $out\n",
+            "build subninja: build include default foo.cc\n",
+            "default subninja\n").as_bytes());
+    }
+/*
 
 TEST_F(ParserTest, Errors) {
   {
@@ -1382,24 +1440,26 @@ TEST_F(ParserTest, Errors) {
     EXPECT_EQ("input:5: unknown pool name 'unnamed_pool'\n", err);
   }
 }
+*/
 
-TEST_F(ParserTest, MissingInput) {
-  State local_state;
-  ManifestParser parser(&local_state, &fs_);
-  string err;
-  EXPECT_FALSE(parser.Load("build.ninja", &err));
-  EXPECT_EQ("loading 'build.ninja': No such file or directory", err);
-}
+    #[test]
+    fn parsertest_missing_input() {
+        let mut parsertest = ParserTest::new();
 
-TEST_F(ParserTest, MultipleOutputs) {
-  State local_state;
-  ManifestParser parser(&local_state, NULL);
-  string err;
-  EXPECT_TRUE(parser.ParseTest("rule cc\n  command = foo\n  depfile = bar\n"
-                               "build a.o b.o: cc c.cc\n",
-                               &err));
-  EXPECT_EQ("", err);
-}
+        let mut state = parsertest.state.borrow_mut();
+        let mut parser = ManifestParser::new(&mut state, &parsertest.fs, Default::default());
+        assert_eq!(Err("loading 'build.ninja': No such file or directory".to_owned()), 
+            parser.load(&PathBuf::from("build.ninja")));
+    }
+
+    #[test]
+    fn parsertest_multiple_outputs() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cc\n  command = foo\n  depfile = bar\n",
+            "build a.o b.o: cc c.cc\n").as_bytes());
+    }
+/*
 
 TEST_F(ParserTest, MultipleOutputsWithDeps) {
   State local_state;
@@ -1436,16 +1496,18 @@ TEST_F(ParserTest, SubNinja) {
   EXPECT_EQ("varref inner", state.edges_[1]->EvaluateCommand());
   EXPECT_EQ("varref outer", state.edges_[2]->EvaluateCommand());
 }
+*/
 
-TEST_F(ParserTest, MissingSubNinja) {
-  ManifestParser parser(&state, &fs_);
-  string err;
-  EXPECT_FALSE(parser.ParseTest("subninja foo.ninja\n", &err));
-  EXPECT_EQ("input:1: loading 'foo.ninja': No such file or directory\n"
-            "subninja foo.ninja\n"
-            "                  ^ near here"
-            , err);
-}
+    #[test]
+    fn parsertest_missing_subninja() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error("subninja foo.ninja\n".as_bytes(),
+          concat!(
+            "input:1: loading 'foo.ninja': No such file or directory\n",
+            "subninja foo.ninja\n",
+            "                  ^ near here"));
+    }
+/*
 
 TEST_F(ParserTest, DuplicateRuleInDifferentSubninjas) {
   // Test that rules are scoped to subninjas.
@@ -1470,28 +1532,36 @@ TEST_F(ParserTest, DuplicateRuleInDifferentSubninjasWithInclude) {
                                 "subninja test.ninja\n"
                                 "build y : cat\n", &err));
 }
+*/
+    #[test]
+    fn parsertest_include() {
+        let mut parsertest = ParserTest::new();
+        let include_filename = PathBuf::from("include.ninja");
+        parsertest.fs.create(&include_filename, b"var = inner\n");
+        parsertest.assert_parse(concat!(
+            "var = outer\n",
+            "include include.ninja\n").as_bytes());
+        
+        assert_eq!(1, parsertest.fs.files_read.borrow().len());
+        assert_eq!(include_filename, parsertest.fs.files_read.borrow()[0]);
 
-TEST_F(ParserTest, Include) {
-  fs_.Create("include.ninja", "var = inner\n");
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"var = outer\n"
-"include include.ninja\n"));
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(b"inner".as_ref(), bindings.lookup_variable(b"var").as_ref());
+    }
 
-  ASSERT_EQ(1u, fs_.files_read_.size());
-  EXPECT_EQ("include.ninja", fs_.files_read_[0]);
-  EXPECT_EQ("inner", state.bindings_.LookupVariable("var"));
-}
-
-TEST_F(ParserTest, BrokenInclude) {
-  fs_.Create("include.ninja", "build\n");
-  ManifestParser parser(&state, &fs_);
-  string err;
-  EXPECT_FALSE(parser.ParseTest("include include.ninja\n", &err));
-  EXPECT_EQ("include.ninja:1: expected path\n"
-            "build\n"
-            "     ^ near here"
-            , err);
-}
+    #[test]
+    fn parsertest_broken_include() {
+        let mut parsertest = ParserTest::new();
+        let include_filename = PathBuf::from("include.ninja");
+        parsertest.fs.create(&include_filename, b"build\n");
+        parsertest.assert_parse_error(concat!("include include.ninja\n").as_bytes(),
+            concat!(
+              "include.ninja:1: expected path\n",
+              "build\n",
+              "     ^ near here"));
+    }
+/*
 
 TEST_F(ParserTest, Implicit) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(

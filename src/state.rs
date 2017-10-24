@@ -223,7 +223,7 @@ impl NodeState {
     }
 
     pub fn lookup_node(&self, path: &[u8]) -> Option<NodeIndex> {
-        metric_record!("lookup node", record);
+        metric_record!("lookup node");
         self.paths.get(path).cloned()
     }
 
@@ -233,7 +233,7 @@ impl NodeState {
 
     pub fn get_node_mut(&mut self, idx: NodeIndex) -> &mut Node {
         self.nodes.get_mut(idx.0).expect("index out of range")
-    }    
+    }
 }
 
 pub struct EdgeState {
@@ -257,7 +257,7 @@ impl EdgeState {
     }
 
     pub fn make_edge(&mut self, rule: Rc<Rule>, bindings: Rc<RefCell<BindingEnv>>) -> EdgeIndex {
-        let mut edge = Edge::new(rule, DEFAULT_POOL.with(Clone::clone), bindings);
+        let edge = Edge::new(rule, DEFAULT_POOL.with(Clone::clone), bindings);
         let idx = EdgeIndex(self.edges.len());
         self.edges.push(edge);
         idx
@@ -337,6 +337,16 @@ impl State {
     pub fn get_env(&self) -> Rc<RefCell<BindingEnv>> {
         self.bindings.clone()
     }
+
+    pub fn add_default(&mut self, path: &[u8]) -> Result<(), String> {
+        let node = self.node_state.lookup_node(path);
+        if let Some(node_idx) = node {
+            self.defaults.push(node_idx);
+            Ok(())
+        } else {
+            Err(format!("unknown target '{}'", String::from_utf8_lossy(path)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -373,27 +383,6 @@ impl State {
     }
 }
 
-/*
-void VerifyGraph(const State& state) {
-  for (vector<Edge*>::const_iterator e = state.edges_.begin();
-       e != state.edges_.end(); ++e) {
-    
-  }
-
-  // The union of all in- and out-edges of each nodes should be exactly edges_.
-  set<const Edge*> node_edge_set;
-  for (State::Paths::const_iterator p = state.paths_.begin();
-       p != state.paths_.end(); ++p) {
-    const Node* n = p->second;
-    if (n->in_edge())
-      node_edge_set.insert(n->in_edge());
-    node_edge_set.insert(n->out_edges().begin(), n->out_edges().end());
-  }
-  set<const Edge*> edge_set(state.edges_.begin(), state.edges_.end());
-  EXPECT_EQ(node_edge_set, edge_set);
-}
-
-*/
 
 /*
 // Copyright 2011 Google Inc. All Rights Reserved.
@@ -505,16 +494,6 @@ bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits) {
     return false;
   edge->outputs_.push_back(node);
   node->set_in_edge(edge);
-  return true;
-}
-
-bool State::AddDefault(StringPiece path, string* err) {
-  Node* node = LookupNode(path);
-  if (!node) {
-    *err = "unknown target '" + path.AsString() + "'";
-    return false;
-  }
-  defaults_.push_back(node);
   return true;
 }
 

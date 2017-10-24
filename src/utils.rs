@@ -19,11 +19,13 @@ use errno;
 use kernel32;
 use num_cpus;
 
+use std::path::PathBuf;
+
 /// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
 /// of a function to get timing stats recorded for each call of the function.
 macro_rules! metric_record {
   ($metric: expr) => {
-      metric_record!($metric, metric_var);
+      metric_record!($metric, METRIC_VAR);
   };
   ($metric: expr, $metric_var: ident) => { 
       lazy_static! {
@@ -123,6 +125,24 @@ pub fn set_stdout_linebuffered() {
 
 pub fn get_processor_count() -> usize {
     num_cpus::get()
+}
+
+#[cfg(unix)]
+fn pathbuf_from_bytes_os(bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
+    Ok(PathBuf::from(OsString::from_vec(bytes)))
+}
+
+#[cfg(not(unix))]
+fn pathbuf_from_bytes_os(bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
+    Err(bytes)
+}
+
+pub fn pathbuf_from_bytes(mut bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
+    bytes = match String::from_utf8(bytes) {
+      Ok(r) => { return Ok(PathBuf::from(r));},
+      Err(e) => { e.into_bytes() }
+    };
+    return pathbuf_from_bytes_os(bytes);
 }
 
 /*
