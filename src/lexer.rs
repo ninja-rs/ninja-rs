@@ -166,9 +166,9 @@ impl<'a, 'b> Lexer<'a, 'b> where 'b : 'a {
         named!(skip_comment<&[u8], ()>,
             fold_many0!(
                 complete!(
-                    terminated!(preceded!(char!('#'), take_while!(is_comment_char)),
-                        char!('\n'))    
-                ),
+                    preceded!(take_while!(is_sp_char), 
+                        terminated!(preceded!(char!('#'), take_while!(is_comment_char)),
+                            char!('\n')))),
                 (),
                 |_, _| ()));
 

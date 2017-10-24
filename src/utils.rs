@@ -1,9 +1,39 @@
+// Copyright 2011 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std;
 use libc;
 use errno;
 #[cfg(windows)]
 use kernel32;
 use num_cpus;
+
+/// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
+/// of a function to get timing stats recorded for each call of the function.
+macro_rules! metric_record {
+  ($metric: expr) => {
+      metric_record!($metric, metric_var);
+  };
+  ($metric: expr, $metric_var: ident) => { 
+      lazy_static! {
+          static ref $metric_var : Option<$crate::metrics::Metric> = 
+              $crate::debug_flags::METRICS.as_ref().map(|m| m.new_metric($metric));
+      }
+      let _ = $crate::metrics::ScopedMetric::new(&$metric_var);
+  };
+}
+
 
 macro_rules! explain {
     ($fmt:expr) => 
@@ -209,23 +239,7 @@ NORETURN void Win32Fatal(const char* function);
 #include "metrics.h"
 */
 
-pub fn canonicalize_path(path: &mut Vec<u8>) -> Result<u64, String> {
-    unimplemented!()
-}
-
 /*
-bool CanonicalizePath(string* path, uint64_t* slash_bits, string* err) {
-  METRIC_RECORD("canonicalize str");
-  size_t len = path->size();
-  char* str = 0;
-  if (len > 0)
-    str = &(*path)[0];
-  if (!CanonicalizePath(str, &len, slash_bits, err))
-    return false;
-  path->resize(len);
-  return true;
-}
-
 static bool IsPathSeparator(char c) {
 #ifdef _WIN32
   return c == '/' || c == '\\';
@@ -233,107 +247,111 @@ static bool IsPathSeparator(char c) {
   return c == '/';
 #endif
 }
+*/
 
-bool CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits,
-                      string* err) {
-  // WARNING: this function is performance-critical; please benchmark
-  // any changes you make to it.
-  METRIC_RECORD("canonicalize path");
-  if (*len == 0) {
-    *err = "empty path";
-    return false;
-  }
+#[cfg(windows)]
+const WINDOWS_PATH : bool = true;
+#[cfg(not(windows))]
+const WINDOWS_PATH : bool = false;
 
-  const int kMaxPathComponents = 60;
-  char* components[kMaxPathComponents];
-  int component_count = 0;
-
-  char* start = path;
-  char* dst = start;
-  const char* src = start;
-  const char* end = start + *len;
-
-  if (IsPathSeparator(*src)) {
-#ifdef _WIN32
-
-    // network path starts with //
-    if (*len > 1 && IsPathSeparator(*(src + 1))) {
-      src += 2;
-      dst += 2;
-    } else {
-      ++src;
-      ++dst;
-    }
-#else
-    ++src;
-    ++dst;
-#endif
-  }
-
-  while (src < end) {
-    if (*src == '.') {
-      if (src + 1 == end || IsPathSeparator(src[1])) {
-        // '.' component; eliminate.
-        src += 2;
-        continue;
-      } else if (src[1] == '.' && (src + 2 == end || IsPathSeparator(src[2]))) {
-        // '..' component.  Back up if possible.
-        if (component_count > 0) {
-          dst = components[component_count - 1];
-          src += 3;
-          --component_count;
-        } else {
-          *dst++ = *src++;
-          *dst++ = *src++;
-          *dst++ = *src++;
-        }
-        continue;
-      }
-    }
-
-    if (IsPathSeparator(*src)) {
-      src++;
-      continue;
-    }
-
-    if (component_count == kMaxPathComponents)
-      Fatal("path has too many components : %s", path);
-    components[component_count] = dst;
-    ++component_count;
-
-    while (src != end && !IsPathSeparator(*src))
-      *dst++ = *src++;
-    *dst++ = *src++;  // Copy '/' or final \0 character as well.
-  }
-
-  if (dst == start) {
-    *dst++ = '.';
-    *dst++ = '\0';
-  }
-
-  *len = dst - start - 1;
-#ifdef _WIN32
-  uint64_t bits = 0;
-  uint64_t bits_mask = 1;
-
-  for (char* c = start; c < start + *len; ++c) {
-    switch (*c) {
-      case '\\':
-        bits |= bits_mask;
-        *c = '/';
-        // Intentional fallthrough.
-      case '/':
-        bits_mask <<= 1;
-    }
-  }
-
-  *slash_bits = bits;
-#else
-  *slash_bits = 0;
-#endif
-  return true;
+fn is_path_separator(c: u8) -> bool {
+    c == b'/' || WINDOWS_PATH && c == b'\\'
 }
 
+
+pub fn canonicalize_path(path: &mut Vec<u8>) -> Result<u64, String> {
+    metric_record!("canonicalize str");
+    let (newsize, slash_bits) = canonicalize_path_slice(path.as_mut_slice())?;
+    path.truncate(newsize);
+    Ok(slash_bits)
+}
+
+pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> {
+    // WARNING: this function is performance-critical; please benchmark
+    // any changes you make to it.
+    metric_record!("canonicalize path");
+    if path.is_empty() {
+        return Err("empty path".to_owned())
+    }
+
+    const MAX_PATH_COMPONENTS: usize = 60usize;
+    let mut components = [0usize; MAX_PATH_COMPONENTS];
+    let mut component_count = 0usize;
+
+    let len = path.len();
+
+    let start = 0;
+    let end = len;
+    let mut dst = 0;
+    let mut src = 0;
+
+    if is_path_separator(path[0]) {
+        if WINDOWS_PATH && len >= 2 && is_path_separator(path[1]) {
+            src += 1;
+            dst += 1;
+        }
+        src += 1;
+        dst += 1;
+    }
+
+    while src < end {
+        if path[src] == b'.' && 
+            (src + 1 == end || is_path_separator(path[src + 1])) {
+            // '.' component; eliminate.
+            src += 2;
+        } else if path[src] == b'.' && path[src + 1] == b'.' && 
+            (src + 2 == end || is_path_separator(path[src + 2])) {
+            if component_count == 0 {
+                path[dst] = path[src];
+                path[dst + 1] = path[src + 1];
+                path[dst + 2] = path[src + 2];
+                dst += 3;
+            } else {
+                dst = components[component_count - 1];
+                component_count -= 1;
+            }
+            src += 3;
+        } else if is_path_separator(path[src]) {
+            src += 1;
+        } else {
+            if component_count == MAX_PATH_COMPONENTS {
+                fatal!("path has too many components : {}", String::from_utf8_lossy(path));
+            }
+
+            components[component_count] = dst;
+            component_count += 1;
+
+            while {
+                path[dst] = path[src];
+                dst += 1;
+                src += 1;
+                src < end && !is_path_separator(path[dst - 1])
+            } {};
+        }
+    }
+
+    if dst == start {
+        path[dst] = b'.';
+        dst += 1;
+    }
+
+    let new_len = dst - start;
+    let mut slash_bits = 0u64;
+    if WINDOWS_PATH {
+        for i in 0..new_len {
+            if path[i] == b'\\' {
+                slash_bits |= 1;
+                path[i] = b'/';
+                slash_bits <<= 1;
+            } else if path[i] == b'/' {
+                slash_bits <<= 1;
+            }
+        }
+    }
+    Ok((new_len, slash_bits))
+}
+
+/*
 static inline bool IsKnownShellSafeCharacter(char ch) {
   if ('A' <= ch && ch <= 'Z') return true;
   if ('a' <= ch && ch <= 'z') return true;
@@ -720,7 +738,444 @@ bool Truncate(const string& path, size_t size, string* err) {
   return true;
 }
 
+*/
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_path_path_samples() {
+        struct TestItem {
+            path: &'static [u8],
+            result: &'static [u8],
+        }
+
+        assert_eq!(canonicalize_path(&mut vec![]), Err("empty path".to_owned()));
+
+        let test_items = vec![
+            TestItem { path: b"foo.h", result: b"foo.h" }
+        ];
+
+        for test_item in test_items {
+            let mut path = test_item.path.to_owned();
+            assert!(canonicalize_path(&mut path).is_ok());
+            assert_eq!(path.as_slice(), test_item.result);
+        }
+    }
+
+}
+
+/*
+
+namespace {
+
+bool CanonicalizePath(string* path, string* err) {
+  uint64_t unused;
+  return ::CanonicalizePath(path, &unused, err);
+}
+
+}  // namespace
+
+TEST(CanonicalizePath, PathSamples) {
+  string path;
+  string err;
+
+  EXPECT_FALSE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("empty path", err);
+
+  path = "foo.h"; err = "";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo.h", path);
+
+  path = "./foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo.h", path);
+
+  path = "./foo/./bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo/bar.h", path);
+
+  path = "./x/foo/../bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("x/bar.h", path);
+
+  path = "./x/foo/../../bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("bar.h", path);
+
+  path = "foo//bar";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo/bar", path);
+
+  path = "foo//.//..///bar";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("bar", path);
+
+  path = "./x/../foo/../../bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("../bar.h", path);
+
+  path = "foo/./.";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo", path);
+
+  path = "foo/bar/..";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo", path);
+
+  path = "foo/.hidden_bar";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo/.hidden_bar", path);
+
+  path = "/foo";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("/foo", path);
+
+  path = "//foo";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+#ifdef _WIN32
+  EXPECT_EQ("//foo", path);
+#else
+  EXPECT_EQ("/foo", path);
+#endif
+
+  path = "/";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("", path);
+
+  path = "/foo/..";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("", path);
+
+  path = ".";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ(".", path);
+
+  path = "./.";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ(".", path);
+
+  path = "foo/..";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ(".", path);
+}
+
+#ifdef _WIN32
+TEST(CanonicalizePath, PathSamplesWindows) {
+  string path;
+  string err;
+
+  EXPECT_FALSE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("empty path", err);
+
+  path = "foo.h"; err = "";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo.h", path);
+
+  path = ".\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo.h", path);
+
+  path = ".\\foo\\.\\bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo/bar.h", path);
+
+  path = ".\\x\\foo\\..\\bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("x/bar.h", path);
+
+  path = ".\\x\\foo\\..\\..\\bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("bar.h", path);
+
+  path = "foo\\\\bar";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo/bar", path);
+
+  path = "foo\\\\.\\\\..\\\\\\bar";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("bar", path);
+
+  path = ".\\x\\..\\foo\\..\\..\\bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("../bar.h", path);
+
+  path = "foo\\.\\.";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo", path);
+
+  path = "foo\\bar\\..";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo", path);
+
+  path = "foo\\.hidden_bar";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("foo/.hidden_bar", path);
+
+  path = "\\foo";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("/foo", path);
+
+  path = "\\\\foo";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("//foo", path);
+
+  path = "\\";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("", path);
+}
+
+TEST(CanonicalizePath, SlashTracking) {
+  string path;
+  string err;
+  uint64_t slash_bits;
+
+  path = "foo.h"; err = "";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("foo.h", path);
+  EXPECT_EQ(0, slash_bits);
+
+  path = "a\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+
+  path = "a/bcd/efh\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/bcd/efh/foo.h", path);
+  EXPECT_EQ(4, slash_bits);
+
+  path = "a\\bcd/efh\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/bcd/efh/foo.h", path);
+  EXPECT_EQ(5, slash_bits);
+
+  path = "a\\bcd\\efh\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/bcd/efh/foo.h", path);
+  EXPECT_EQ(7, slash_bits);
+
+  path = "a/bcd/efh/foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/bcd/efh/foo.h", path);
+  EXPECT_EQ(0, slash_bits);
+
+  path = "a\\./efh\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/efh/foo.h", path);
+  EXPECT_EQ(3, slash_bits);
+
+  path = "a\\../efh\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("efh/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+
+  path = "a\\b\\c\\d\\e\\f\\g\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/b/c/d/e/f/g/foo.h", path);
+  EXPECT_EQ(127, slash_bits);
+
+  path = "a\\b\\c\\..\\..\\..\\g\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("g/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+
+  path = "a\\b/c\\../../..\\g\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("g/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+
+  path = "a\\b/c\\./../..\\g\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/g/foo.h", path);
+  EXPECT_EQ(3, slash_bits);
+
+  path = "a\\b/c\\./../..\\g/foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/g/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+
+  path = "a\\\\\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+
+  path = "a/\\\\foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/foo.h", path);
+  EXPECT_EQ(0, slash_bits);
+
+  path = "a\\//foo.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ("a/foo.h", path);
+  EXPECT_EQ(1, slash_bits);
+}
+
+TEST(CanonicalizePath, CanonicalizeNotExceedingLen) {
+  // Make sure searching \/ doesn't go past supplied len.
+  char buf[] = "foo/bar\\baz.h\\";  // Last \ past end.
+  uint64_t slash_bits;
+  string err;
+  size_t size = 13;
+  EXPECT_TRUE(::CanonicalizePath(buf, &size, &slash_bits, &err));
+  EXPECT_EQ(0, strncmp("foo/bar/baz.h", buf, size));
+  EXPECT_EQ(2, slash_bits);  // Not including the trailing one.
+}
+
+TEST(CanonicalizePath, TooManyComponents) {
+  string path;
+  string err;
+  uint64_t slash_bits;
+
+  // 64 is OK.
+  path = "a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./"
+         "a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./x.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ(slash_bits, 0x0);
+
+  // Backslashes version.
+  path =
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\"
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\"
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\"
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\x.h";
+
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ(slash_bits, 0xffffffff);
+
+  // 65 is OK if #component is less than 60 after path canonicalization.
+  err = "";
+  path = "a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./"
+         "a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./a/./x/y.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ(slash_bits, 0x0);
+
+  // Backslashes version.
+  err = "";
+  path =
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\"
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\"
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\"
+      "a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\a\\.\\x\\y.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ(slash_bits, 0x1ffffffff);
 
 
+  // 59 after canonicalization is OK.
+  err = "";
+  path = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/"
+         "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/x/y.h";
+  EXPECT_EQ(58, std::count(path.begin(), path.end(), '/'));
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ(slash_bits, 0x0);
 
+  // Backslashes version.
+  err = "";
+  path =
+      "a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\"
+      "a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\"
+      "a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a\\"
+      "a\\a\\a\\a\\a\\a\\a\\a\\a\\x\\y.h";
+  EXPECT_EQ(58, std::count(path.begin(), path.end(), '\\'));
+  EXPECT_TRUE(CanonicalizePath(&path, &slash_bits, &err));
+  EXPECT_EQ(slash_bits, 0x3ffffffffffffff);
+}
+#endif
+
+TEST(CanonicalizePath, UpDir) {
+  string path, err;
+  path = "../../foo/bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("../../foo/bar.h", path);
+
+  path = "test/../../foo/bar.h";
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("../foo/bar.h", path);
+}
+
+TEST(CanonicalizePath, AbsolutePath) {
+  string path = "/usr/include/stdio.h";
+  string err;
+  EXPECT_TRUE(CanonicalizePath(&path, &err));
+  EXPECT_EQ("/usr/include/stdio.h", path);
+}
+
+TEST(CanonicalizePath, NotNullTerminated) {
+  string path;
+  string err;
+  size_t len;
+  uint64_t unused;
+
+  path = "foo/. bar/.";
+  len = strlen("foo/.");  // Canonicalize only the part before the space.
+  EXPECT_TRUE(CanonicalizePath(&path[0], &len, &unused, &err));
+  EXPECT_EQ(strlen("foo"), len);
+  EXPECT_EQ("foo/. bar/.", string(path));
+
+  path = "foo/../file bar/.";
+  len = strlen("foo/../file");
+  EXPECT_TRUE(CanonicalizePath(&path[0], &len, &unused, &err));
+  EXPECT_EQ(strlen("file"), len);
+  EXPECT_EQ("file ./file bar/.", string(path));
+}
+
+TEST(PathEscaping, TortureTest) {
+  string result;
+
+  GetWin32EscapedString("foo bar\\\"'$@d!st!c'\\path'\\", &result);
+  EXPECT_EQ("\"foo bar\\\\\\\"'$@d!st!c'\\path'\\\\\"", result);
+  result.clear();
+
+  GetShellEscapedString("foo bar\"/'$@d!st!c'/path'", &result);
+  EXPECT_EQ("'foo bar\"/'\\''$@d!st!c'\\''/path'\\'''", result);
+}
+
+TEST(PathEscaping, SensiblePathsAreNotNeedlesslyEscaped) {
+  const char* path = "some/sensible/path/without/crazy/characters.c++";
+  string result;
+
+  GetWin32EscapedString(path, &result);
+  EXPECT_EQ(path, result);
+  result.clear();
+
+  GetShellEscapedString(path, &result);
+  EXPECT_EQ(path, result);
+}
+
+TEST(PathEscaping, SensibleWin32PathsAreNotNeedlesslyEscaped) {
+  const char* path = "some\\sensible\\path\\without\\crazy\\characters.c++";
+  string result;
+
+  GetWin32EscapedString(path, &result);
+  EXPECT_EQ(path, result);
+}
+
+TEST(StripAnsiEscapeCodes, EscapeAtEnd) {
+  string stripped = StripAnsiEscapeCodes("foo\33");
+  EXPECT_EQ("foo", stripped);
+
+  stripped = StripAnsiEscapeCodes("foo\33[");
+  EXPECT_EQ("foo", stripped);
+}
+
+TEST(StripAnsiEscapeCodes, StripColors) {
+  // An actual clang warning.
+  string input = "\33[1maffixmgr.cxx:286:15: \33[0m\33[0;1;35mwarning: "
+                 "\33[0m\33[1musing the result... [-Wparentheses]\33[0m";
+  string stripped = StripAnsiEscapeCodes(input);
+  EXPECT_EQ("affixmgr.cxx:286:15: warning: using the result... [-Wparentheses]",
+            stripped);
+}
+
+TEST(ElideMiddle, NothingToElide) {
+  string input = "Nothing to elide in this short string.";
+  EXPECT_EQ(input, ElideMiddle(input, 80));
+}
+
+TEST(ElideMiddle, ElideInTheMiddle) {
+  string input = "01234567890123456789";
+  string elided = ElideMiddle(input, 10);
+  EXPECT_EQ("012...789", elided);
+}
 */

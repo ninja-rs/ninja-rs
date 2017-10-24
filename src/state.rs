@@ -187,10 +187,10 @@ struct State {
 */
 
 thread_local!{ 
-    static DEFAULT_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"".as_ref().to_owned(), 0)));
-    static CONSOLE_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"console".as_ref().to_owned(), 1)));
+    pub static DEFAULT_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"".as_ref().to_owned(), 0)));
+    pub static CONSOLE_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"console".as_ref().to_owned(), 1)));
 
-    static PHONY_RULE: Rc<Rule> = Rc::new(Rule::new(b"phony".as_ref().to_owned()));
+    pub static PHONY_RULE: Rc<Rule> = Rc::new(Rule::new(b"phony".as_ref().to_owned()));
 }
 
 pub struct NodeState {
@@ -216,8 +216,8 @@ impl NodeState {
         }
 
         let node = Node::new(path, slash_bits);
-        self.nodes.push(node);
         let node_idx = NodeIndex(self.nodes.len());
+        self.nodes.push(node);
         self.paths.insert(path.to_owned(), node_idx);
         node_idx
     }
@@ -258,8 +258,9 @@ impl EdgeState {
 
     pub fn make_edge(&mut self, rule: Rc<Rule>, bindings: Rc<RefCell<BindingEnv>>) -> EdgeIndex {
         let mut edge = Edge::new(rule, DEFAULT_POOL.with(Clone::clone), bindings);
+        let idx = EdgeIndex(self.edges.len());
         self.edges.push(edge);
-        EdgeIndex(self.edges.len() - 1)
+        idx
     }
 
     pub fn revoke_latest_edge(&mut self, idx: EdgeIndex) {
@@ -341,24 +342,21 @@ impl State {
 #[cfg(test)]
 impl State {
     pub fn verify_graph(&self) {
-        for e in self.edge_state.edges.iter() {
-            /*
+        for (i, e) in self.edge_state.edges.iter().enumerate() {
             // All edges need at least one output.
-            EXPECT_FALSE((*e)->outputs_.empty());
+            assert_eq!(false, e.outputs.is_empty());
+
             // Check that the edge's inputs have the edge as out-edge.
-            for (vector<Node*>::const_iterator in_node = (*e)->inputs_.begin();
-                in_node != (*e)->inputs_.end(); ++in_node) {
-            const vector<Edge*>& out_edges = (*in_node)->out_edges();
-            EXPECT_NE(find(out_edges.begin(), out_edges.end(), *e),
-                        out_edges.end());
+            for in_node_idx in e.inputs.iter() {
+                let in_node = self.node_state.get_node(*in_node_idx);
+                assert!(in_node.out_edges().contains(&EdgeIndex(i)));
             }
+
             // Check that the edge's outputs have the edge as in-edge.
-            for (vector<Node*>::const_iterator out_node = (*e)->outputs_.begin();
-                out_node != (*e)->outputs_.end(); ++out_node) {
-            EXPECT_EQ((*out_node)->in_edge(), *e);
+            for out_node_idx in e.outputs.iter() {
+                let out_node = self.node_state.get_node(*out_node_idx);
+                assert_eq!(out_node.in_edge(), Some(EdgeIndex(i)));
             }
-            */
-            unimplemented!()
         }
 
         // The union of all in- and out-edges of each nodes should be exactly edges_.

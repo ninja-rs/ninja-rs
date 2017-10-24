@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// An interface for a scope for variable (e.g. "$foo") lookups.
 pub trait Env {
@@ -140,24 +140,24 @@ impl Rule {
 /// An Env which contains a mapping of variables to values
 /// as well as a pointer to a parent scope.
 pub struct BindingEnv {
-    bindings: HashMap<Vec<u8>, Vec<u8>>,
-    rules: HashMap<Vec<u8>, Rc<Rule>>,
+    bindings: BTreeMap<Vec<u8>, Vec<u8>>,
+    rules: BTreeMap<Vec<u8>, Rc<Rule>>,
     parent: Option<Rc<RefCell<BindingEnv>>>
 }
 
 impl BindingEnv {
     pub fn new() -> Self {
         BindingEnv {
-            bindings: HashMap::new(),
-            rules: HashMap::new(),
+            bindings: BTreeMap::new(),
+            rules: BTreeMap::new(),
             parent: None,
         }
     }
 
     pub fn new_with_parent(parent: Option<Rc<RefCell<BindingEnv>>>) -> Self {
         BindingEnv {
-            bindings: HashMap::new(),
-            rules: HashMap::new(),
+            bindings: BTreeMap::new(),
+            rules: BTreeMap::new(),
             parent: parent,
         }
     }
@@ -191,7 +191,7 @@ impl BindingEnv {
         self.rules.insert(rule.name().to_owned(), rule);
     }
 
-    pub fn get_rules(&self) -> &HashMap<Vec<u8>, Rc<Rule>> {
+    pub fn get_rules(&self) -> &BTreeMap<Vec<u8>, Rc<Rule>> {
         return &self.rules;
     }
 

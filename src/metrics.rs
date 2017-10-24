@@ -41,19 +41,6 @@ impl Metrics {
     }
 }
 
-/// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
-/// of a function to get timing stats recorded for each call of the function.
-macro_rules! metric_record {
-  ($metric: expr, $metric_var: ident) => { 
-      lazy_static! {
-          static ref $metric_var : Option<$crate::metrics::Metric> = 
-              $crate::debug_flags::METRICS.as_ref().map(|m| m.new_metric($metric));
-      }
-      let _ = $crate::metrics::ScopedMetric::new(&$metric_var);
-  };
-}
-
-
 /*
 
 

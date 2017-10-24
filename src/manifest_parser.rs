@@ -26,11 +26,13 @@ use super::disk_interface::FileReader;
 use super::version::check_ninja_version;
 use super::utils::canonicalize_path;
 
+#[derive(PartialEq)]
 pub enum DupeEdgeAction {
     WARN,
     ERROR,
 }
 
+#[derive(PartialEq)]
 pub enum PhonyCycleAction {
     WARN,
     ERROR,
@@ -420,38 +422,39 @@ impl<'a, 'c> ManifestParser<'a, 'c> where 'c : 'a {
         edge.implicit_deps = implicit;
         edge.order_only_deps = order_only;
 
+        if self.options.phony_cycle_action == PhonyCycleAction::WARN && edge.maybe_phonycycle_diagnostic() {
+            // CMake 2.8.12.x and 3.0.x incorrectly write phony build statements
+            // that reference themselves.  Ninja used to tolerate these in the
+            // build graph but that has since been fixed.  Filter them out to
+            // support users of those old CMake versions.
+            let out_node_idx = edge.outputs[0];
+            // XXX use drain_filter instead.
+            let mut i = 0;
+            let mut modified = false;
+            while i != edge.inputs.len() {
+              if edge.inputs[i] == out_node_idx {
+                edge.inputs.remove(i);
+                i -= 1;
+                modified = true;
+              }
+              i += 1;
+            }
+            if modified && !self.quiet {
+              let out_node = self.state.node_state.get_node(out_node_idx);
+              warning!("phony target '{}' names itself as an input; ignoring [-w phonycycle=warn]",
+                String::from_utf8_lossy(out_node.path()));
+            }
+        }
 
-/*
-  if (options_.phony_cycle_action_ == kPhonyCycleActionWarn &&
-      edge->maybe_phonycycle_diagnostic()) {
-    // CMake 2.8.12.x and 3.0.x incorrectly write phony build statements
-    // that reference themselves.  Ninja used to tolerate these in the
-    // build graph but that has since been fixed.  Filter them out to
-    // support users of those old CMake versions.
-    Node* out = edge->outputs_[0];
-    vector<Node*>::iterator new_end =
-        remove(edge->inputs_.begin(), edge->inputs_.end(), out);
-    if (new_end != edge->inputs_.end()) {
-      edge->inputs_.erase(new_end, edge->inputs_.end());
-      if (!quiet_) {
-        Warning("phony target '%s' names itself as an input; "
-                "ignoring [-w phonycycle=warn]",
-                out->path().c_str());
-      }
-    }
-  }
-
-  // Multiple outputs aren't (yet?) supported with depslog.
-  string deps_type = edge->GetBinding("deps");
-  if (!deps_type.empty() && edge->outputs_.size() > 1) {
-    return lexer_.Error("multiple outputs aren't (yet?) supported by depslog; "
-                        "bring this up on the mailing list if it affects you",
-                        err);
-  }
-
-  return true;
-*/
-        unimplemented!()
+        // Multiple outputs aren't (yet?) supported with depslog.
+        let deps_type = edge.get_binding(b"deps");
+        if !deps_type.is_empty() && edge.outputs.len() > 1 {
+            return Err(self.lexer.error(
+                concat!(
+                  "multiple outputs aren't (yet?) supported by depslog; ",
+                  "bring this up on the mailing list if it affects you")));
+        }
+        Ok(())
     }
 
     fn parse_default(&mut self) -> Result<(), String> {
@@ -612,28 +615,34 @@ mod parser_test {
           ).as_bytes());
     }
 
+    #[test]
+    fn parsertest_ignore_indented_comments() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "  #indented comment\n",
+          "rule cat\n",
+          "  command = cat $in > $out\n",
+          "  #generator = 1\n",
+          "  restat = 1 # comment\n",
+          "  #comment\n",
+          "build result: cat in_1.cc in-2.O\n",
+          "  #comment\n"
+          ).as_bytes());
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(2usize, bindings.get_rules().len());
+        let rule = bindings.get_rules().iter().next().unwrap().1;
+        assert_eq!(b"cat", rule.name());
+
+        let node_idx = state.node_state.lookup_node(b"result").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        let edge = state.edge_state.get_edge(edge_idx);
+        assert_eq!(true, edge.get_binding_bool(b"restat"));
+        assert_eq!(false, edge.get_binding_bool(b"generator"));
+    }
 
 
 /*
-
-TEST_F(ParserTest, IgnoreIndentedComments) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"  #indented comment\n"
-"rule cat\n"
-"  command = cat $in > $out\n"
-"  #generator = 1\n"
-"  restat = 1 # comment\n"
-"  #comment\n"
-"build result: cat in_1.cc in-2.O\n"
-"  #comment\n"));
-
-  ASSERT_EQ(2u, state.bindings_.GetRules().size());
-  const Rule* rule = state.bindings_.GetRules().begin()->second;
-  EXPECT_EQ("cat", rule->name());
-  Edge* edge = state.GetNode("result", 0)->in_edge();
-  EXPECT_TRUE(edge->GetBindingBool("restat"));
-  EXPECT_FALSE(edge->GetBindingBool("generator"));
-}
 
 TEST_F(ParserTest, IgnoreIndentedBlankLines) {
   // the indented blanks used to cause parse errors

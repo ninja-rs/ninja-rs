@@ -57,13 +57,13 @@ impl<'a> Options<'a> {
 enum ToolRunAfter {
     /// Run after parsing the command-line flags and potentially changing
     /// the current working directory (as early as possible).
-    RUN_AFTER_FLAGS,
+    RunAfterFlags,
 
     /// Run after loading build.ninja.
-    RUN_AFTER_LOAD,
+    RunAfterLoad,
 
     /// Run after loading the build/deps logs.
-    RUN_AFTER_LOGS,
+    RunAfterLogs,
 }
 
 /// Subtools, accessible via "-t foo".
@@ -447,7 +447,7 @@ pub fn ninja_entry() -> Result<(), isize> {
         });
     }
 
-    if Some(ToolRunAfter::RUN_AFTER_FLAGS) == (options.tool.as_ref().map(|tool| tool.when)) {
+    if Some(ToolRunAfter::RunAfterFlags) == (options.tool.as_ref().map(|tool| tool.when)) {
         let ninja = NinjaMain::new(&ninja_command, &config);
         let tool_func = options.tool.as_ref().unwrap().func.clone();
         return tool_func(&ninja, &options);
@@ -473,7 +473,7 @@ pub fn ninja_entry() -> Result<(), isize> {
               })?;
         }
         
-        if Some(ToolRunAfter::RUN_AFTER_LOAD) == (options.tool.as_ref().map(|tool| tool.when)) {
+        if Some(ToolRunAfter::RunAfterLoad) == (options.tool.as_ref().map(|tool| tool.when)) {
             let tool_func = options.tool.as_ref().unwrap().func.clone();
             return tool_func(&ninja, &options);
         }
@@ -482,7 +482,7 @@ pub fn ninja_entry() -> Result<(), isize> {
         ninja.open_build_log(false).map_err(|_| 1isize)?;
         ninja.open_deps_log(false).map_err(|_| 1isize)?;
 
-        if Some(ToolRunAfter::RUN_AFTER_LOGS) == (options.tool.as_ref().map(|tool| tool.when)) {
+        if Some(ToolRunAfter::RunAfterLogs) == (options.tool.as_ref().map(|tool| tool.when)) {
             let tool_func = options.tool.as_ref().unwrap().func.clone();
             return tool_func(&ninja, &options);
         }

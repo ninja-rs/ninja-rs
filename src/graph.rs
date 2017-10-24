@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::borrow::Cow;
+use std::ops::Range;
 
 use super::state::Pool;
+use super::state::{PHONY_RULE, CONSOLE_POOL};
 use super::eval_env::{Env, Rule, BindingEnv};
 use super::timestamp::TimeStamp;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct NodeIndex(pub(crate) usize);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct EdgeIndex(pub(crate) usize);
 
 /// Information about a node in the dependency graph: the file, whether
@@ -93,6 +95,11 @@ impl Node {
     pub fn add_out_edge(&mut self, edge: EdgeIndex) {
         self.out_edges.push(edge);
     }
+
+    pub fn path(&self) -> &[u8] {
+        &self.path
+    }
+
 }
 
 /*
@@ -135,7 +142,6 @@ struct Node {
     return mtime_ != -1;
   }
 
-  const string& path() const { return path_; }
   /// Get |path()| but use slash_bits to convert back to original slash styles.
   string PathDecanonicalized() const {
     return PathDecanonicalized(path_, slash_bits_);
@@ -194,8 +200,30 @@ impl Edge {
           implicit_outs: 0
         }
     }
-    pub fn weight(&self) -> isize { return 1; }
+
+    pub fn rule(&self) -> &Rc<Rule> {
+        &self.rule
+    }
+
+    pub fn pool(&self) -> &Rc<RefCell<Pool>> {
+        &self.pool
+    }
+
+    pub fn weight(&self) -> isize { 
+        1 
+    }
+
+    pub fn outputs_ready(&self) -> bool { 
+        self.outputs_ready
+    }
     
+    pub fn explicit_deps_range(&self) -> Range<usize> {
+        0..(self.inputs.len() - self.implicit_deps - self.order_only_deps)
+    }
+
+    pub fn explicit_outs_range(&self) -> Range<usize> {
+        0..(self.outputs.len() - self.implicit_outs)
+    }    
 
     /// Returns the shell-escaped value of |key|.
     pub fn get_binding(&self, key: &[u8]) -> Cow<[u8]> {
@@ -218,7 +246,26 @@ impl Edge {
         let env = EdgeEnv::new(self, EdgeEnvEscapeKind::DoNotEscape);
         env.lookup_variable(b"rspfile").into_owned().into()
     }
+
+    pub fn is_phony(&self) -> bool {
+        self.rule.as_ref() as * const Rule == 
+          PHONY_RULE.with(|x| x.as_ref() as * const Rule)
+    }
+
+    pub fn use_console(&self) -> bool {
+        &*self.pool().borrow() as * const Pool ==
+          CONSOLE_POOL.with(|x| &*x.borrow() as * const Pool)
+    }
+
+    pub fn maybe_phonycycle_diagnostic(&self) -> bool {
+        // CMake 2.8.12.x and 3.0.x produced self-referencing phony rules
+        // of the form "build a: phony ... a ...".   Restrict our
+        // "phonycycle" diagnostic option to the form it used.
+        self.is_phony() && self.outputs.len() == 1 && 
+          self.implicit_outs == 0 && self.implicit_deps == 0
+    }
 }
+
 
 /*
 
@@ -237,10 +284,6 @@ struct Edge {
   /// full contents of a response file (if applicable)
   string EvaluateCommand(bool incl_rsp_file = false);
 
-  /// Returns the shell-escaped value of |key|.
-  string GetBinding(const string& key);
-  bool GetBindingBool(const string& key);
-
   void Dump(const char* prefix="") const;
 
 
@@ -248,10 +291,6 @@ struct Edge {
   bool outputs_ready_;
   bool deps_missing_;
 
-  const Rule& rule() const { return *rule_; }
-  Pool* pool() const { return pool_; }
-  int weight() const { return 1; }
-  bool outputs_ready() const { return outputs_ready_; }
 
   // There are three types of inputs.
   // 1) explicit deps, which show up as $in on the command line;
@@ -283,7 +322,7 @@ struct Edge {
 
   bool is_phony() const;
   bool use_console() const;
-  bool maybe_phonycycle_diagnostic() const;
+
 };
 
 
@@ -675,78 +714,67 @@ enum EdgeEnvEscapeKind {
 
 /// An Env for an Edge, providing $in and $out.
 struct EdgeEnv<'a> {
-    lookups: Vec<Vec<u8>>,
+    lookups: RefCell<Vec<Vec<u8>>>,
     edge: &'a Edge,
     escape_in_out: EdgeEnvEscapeKind,
-    recursive: bool,
+    recursive: Cell<bool>,
 }
 
 impl<'a> EdgeEnv<'a> {
     pub fn new(edge: &'a Edge, escape: EdgeEnvEscapeKind) -> Self {
         EdgeEnv {
-          lookups: Vec::new(),
+          lookups: RefCell::new(Vec::new()),
           edge,
           escape_in_out: escape,
-          recursive: false
+          recursive: Cell::new(false)
         }
     }
 
     /// Given a span of Nodes, construct a list of paths suitable for a command
     /// line.
-    pub fn make_path_list<I: Iterator<Item=NodeIndex>>(node_iter: I, sep: char) -> Vec<u8> {
+    pub fn make_path_list(nodes: &[NodeIndex], sep: char) -> Vec<u8> {
         unimplemented!()
     }
 }
 
 impl<'a> Env for EdgeEnv<'a> {
     fn lookup_variable(&self, var: &[u8]) -> Cow<[u8]> {
-        unimplemented!();
+        if var == b"in".as_ref() || var == b"in_newline".as_ref() {
+            let sep = if var == b"in".as_ref() { ' ' } else { '\n' };
+            let explicit_deps_range = self.edge.explicit_deps_range();
+            return Cow::Owned(EdgeEnv::make_path_list(&self.edge.inputs[explicit_deps_range], sep));
+        } else if var == b"out".as_ref() {
+            let explicit_outs_range = self.edge.explicit_outs_range();
+            return Cow::Owned(EdgeEnv::make_path_list(&self.edge.outputs[explicit_outs_range], ' '));
+        }
+
+        if self.recursive.get() {
+            let lookups = self.lookups.borrow();
+            let mut lookups_iter = lookups.iter().skip_while(|v| var != v as &[u8]).peekable();
+            if lookups_iter.peek().is_some() {
+                let mut cycle = Vec::new();
+                for it in lookups_iter {
+                    cycle.extend_from_slice(&it);
+                    cycle.extend_from_slice(b" -> ");
+                }
+                cycle.extend_from_slice(var);
+                fatal!("cycle in rule variables: {}", String::from_utf8_lossy(&cycle))
+            }
+        }
+
+        // See notes on BindingEnv::LookupWithFallback.
+        let eval = self.edge.rule.get_binding(var);
+        if self.recursive.get() && eval.is_some() {
+            self.lookups.borrow_mut().push(var.to_owned());
+        }
+
+        // In practice, variables defined on rules never use another rule variable.
+        // For performance, only start checking for cycles after the first lookup.
+        self.recursive.set(true);
+        return Cow::Owned(self.edge.env.borrow().lookup_with_fallback(var, eval, self).into_owned());
     }
 }
 /*
-struct EdgeEnv : public Env {
-  virtual string LookupVariable(const string& var);
-
-  string MakePathList(vector<Node*>::iterator begin,
-                      vector<Node*>::iterator end,
-                      char sep);
-};
-
-string EdgeEnv::LookupVariable(const string& var) {
-  if (var == "in" || var == "in_newline") {
-    int explicit_deps_count = edge_->inputs_.size() - edge_->implicit_deps_ -
-      edge_->order_only_deps_;
-    return MakePathList(edge_->inputs_.begin(),
-                        edge_->inputs_.begin() + explicit_deps_count,
-                        var == "in" ? ' ' : '\n');
-  } else if (var == "out") {
-    int explicit_outs_count = edge_->outputs_.size() - edge_->implicit_outs_;
-    return MakePathList(edge_->outputs_.begin(),
-                        edge_->outputs_.begin() + explicit_outs_count,
-                        ' ');
-  }
-
-  if (recursive_) {
-    vector<string>::const_iterator it;
-    if ((it = find(lookups_.begin(), lookups_.end(), var)) != lookups_.end()) {
-      string cycle;
-      for (; it != lookups_.end(); ++it)
-        cycle.append(*it + " -> ");
-      cycle.append(var);
-      Fatal(("cycle in rule variables: " + cycle).c_str());
-    }
-  }
-
-  // See notes on BindingEnv::LookupWithFallback.
-  const EvalString* eval = edge_->rule_->GetBinding(var);
-  if (recursive_ && eval)
-    lookups_.push_back(var);
-
-  // In practice, variables defined on rules never use another rule variable.
-  // For performance, only start checking for cycles after the first lookup.
-  recursive_ = true;
-  return edge_->env_->LookupWithFallback(var, eval, this);
-}
 
 string EdgeEnv::MakePathList(vector<Node*>::iterator begin,
                              vector<Node*>::iterator end,
@@ -779,21 +807,6 @@ string Edge::EvaluateCommand(bool incl_rsp_file) {
   return command;
 }
 
-string Edge::GetBinding(const string& key) {
-  EdgeEnv env(this, EdgeEnv::kShellEscape);
-  return env.LookupVariable(key);
-}
-
-string Edge::GetUnescapedDepfile() {
-  EdgeEnv env(this, EdgeEnv::kDoNotEscape);
-  return env.LookupVariable("depfile");
-}
-
-string Edge::GetUnescapedRspfile() {
-  EdgeEnv env(this, EdgeEnv::kDoNotEscape);
-  return env.LookupVariable("rspfile");
-}
-
 void Edge::Dump(const char* prefix) const {
   printf("%s[ ", prefix);
   for (vector<Node*>::const_iterator i = inputs_.begin();
@@ -815,21 +828,6 @@ void Edge::Dump(const char* prefix) const {
   printf("] 0x%p\n", this);
 }
 
-bool Edge::is_phony() const {
-  return rule_ == &State::kPhonyRule;
-}
-
-bool Edge::use_console() const {
-  return pool() == &State::kConsolePool;
-}
-
-bool Edge::maybe_phonycycle_diagnostic() const {
-  // CMake 2.8.12.x and 3.0.x produced self-referencing phony rules
-  // of the form "build a: phony ... a ...".   Restrict our
-  // "phonycycle" diagnostic option to the form it used.
-  return is_phony() && outputs_.size() == 1 && implicit_outs_ == 0 &&
-      implicit_deps_ == 0;
-}
 
 // static
 string Node::PathDecanonicalized(const string& path, uint64_t slash_bits) {
