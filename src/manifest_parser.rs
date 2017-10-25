@@ -847,53 +847,61 @@ mod parser_test {
         assert_eq!(edge0.evaluate_command(&state.node_state), b"something".as_ref().to_owned());
     }
 
+    #[test]
+    fn parsertest_canonicalize_file() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build out: cat in/1 in//2\n",
+            "build in/1: cat\n",
+            "build in/2: cat\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        assert!(state.node_state.lookup_node(b"in/1").is_some());
+        assert!(state.node_state.lookup_node(b"in/2").is_some());
+        assert!(state.node_state.lookup_node(b"in//1").is_none());
+        assert!(state.node_state.lookup_node(b"in//2").is_none());
+    }
+    
+    #[cfg(windows)]
+    #[test]
+    fn parsertest_canonicalize_file_backslashes() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build out: cat in\\1 in\\\\2\n",
+            "build in\\1: cat\n",
+            "build in\\2: cat\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        let node1_idx = state.node_state.lookup_node(b"in/1");
+        assert!(node1_idx.is_some());
+        assert_eq!(1, state.node_state.get_node(node1_idx.unwrap()).slash_bits());
+        let node2_idx = state.node_state.lookup_node(b"in/2");
+        assert!(node2_idx.is_some());
+        assert_eq!(1, state.node_state.get_node(node2_idx.unwrap()).slash_bits());
+        assert!(state.node_state.lookup_node(b"in//1").is_none());
+        assert!(state.node_state.lookup_node(b"in//2").is_none());
+    }
+
+    #[test]
+    fn parsertest_path_variables() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "dir = out\n",
+            "build $dir/exe: cat src\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        assert!(state.node_state.lookup_node(b"$dir/exe").is_none());
+        assert!(state.node_state.lookup_node(b"out/exe").is_some());
+    }
+
     
 /*
-
-TEST_F(ParserTest, CanonicalizeFile) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build out: cat in/1 in//2\n"
-"build in/1: cat\n"
-"build in/2: cat\n"));
-
-  EXPECT_TRUE(state.LookupNode("in/1"));
-  EXPECT_TRUE(state.LookupNode("in/2"));
-  EXPECT_FALSE(state.LookupNode("in//1"));
-  EXPECT_FALSE(state.LookupNode("in//2"));
-}
-
-#ifdef _WIN32
-TEST_F(ParserTest, CanonicalizeFileBackslashes) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build out: cat in\\1 in\\\\2\n"
-"build in\\1: cat\n"
-"build in\\2: cat\n"));
-
-  Node* node = state.LookupNode("in/1");;
-  EXPECT_TRUE(node);
-  EXPECT_EQ(1, node->slash_bits());
-  node = state.LookupNode("in/2");
-  EXPECT_TRUE(node);
-  EXPECT_EQ(1, node->slash_bits());
-  EXPECT_FALSE(state.LookupNode("in//1"));
-  EXPECT_FALSE(state.LookupNode("in//2"));
-}
-#endif
-
-TEST_F(ParserTest, PathVariables) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"dir = out\n"
-"build $dir/exe: cat src\n"));
-
-  EXPECT_FALSE(state.LookupNode("$dir/exe"));
-  EXPECT_TRUE(state.LookupNode("out/exe"));
-}
 
 TEST_F(ParserTest, CanonicalizePaths) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(

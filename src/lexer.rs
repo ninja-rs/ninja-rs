@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::ffi::{OsString, OsStr};
-use nom::{IResult, Offset};
+use nom::{self, IResult, Offset};
 
 use super::eval_env::EvalString;
 
@@ -158,23 +158,28 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 (),
                 |_, _| ()));
 
+        named!(ident_or_keyword<&[u8], LexerToken>,
+            alt_complete!(
+                value!(LexerToken::BUILD, terminated!(tag!("build"), eof!())) |
+                value!(LexerToken::POOL, terminated!(tag!("pool"), eof!())) |
+                value!(LexerToken::RULE, terminated!(tag!("rule"), eof!())) |
+                value!(LexerToken::DEFAULT, terminated!(tag!("default"), eof!())) |
+                value!(LexerToken::INCLUDE, terminated!(tag!("include"), eof!())) |
+                value!(LexerToken::SUBNINJA, terminated!(tag!("subninja"), eof!())) |
+                value!(LexerToken::IDENT, nom::non_empty)
+            ));
+
         named!(read_one_token<&[u8], LexerToken>,
             alt_complete!(
                 value!(LexerToken::NEWLINE, 
                     preceded!(take_while!(is_sp_char),
                         preceded!(opt!(char!('\r')), char!('\n')))) |
                 value!(LexerToken::INDENT, take_while1!(is_sp_char)) |
-                value!(LexerToken::BUILD, tag!("build")) |
-                value!(LexerToken::POOL, tag!("pool")) |
-                value!(LexerToken::RULE, tag!("rule")) |
-                value!(LexerToken::DEFAULT, tag!("default")) |
                 value!(LexerToken::EQUALS, tag!("=")) |
                 value!(LexerToken::COLON, tag!(":")) |
                 value!(LexerToken::PIPE2, tag!("||")) |
                 value!(LexerToken::PIPE, tag!("|")) |
-                value!(LexerToken::INCLUDE, tag!("include")) |
-                value!(LexerToken::SUBNINJA, tag!("subninja")) |
-                value!(LexerToken::IDENT, take_while1!(is_varname_char)) |
+                flat_map!(take_while1!(is_varname_char), ident_or_keyword) |
                 value!(LexerToken::TEOF, char!('\0')) |
                 value!(LexerToken::ERROR, take!(1)) |
                 value!(LexerToken::TEOF, eof!())

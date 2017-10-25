@@ -16,6 +16,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+use std::io::Write;
 
 /// An interface for a scope for variable (e.g. "$foo") lookups.
 pub trait Env {
@@ -91,6 +93,12 @@ impl EvalString {
             result.extend_from_slice(b"]");
         }
         result
+    }
+}
+
+impl fmt::Debug for EvalString {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "EvalString {{ {} }}", String::from_utf8_lossy(&self.serialize()))
     }
 }
 

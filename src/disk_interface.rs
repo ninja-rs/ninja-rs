@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::path::Path;
-use std::fs::File;
-use std::io::{Read, ErrorKind};
+use std::fs::{self};
+use std::io::{self, Read, ErrorKind};
 
 /// Result of ReadFile.
 pub enum FileReaderError {
@@ -35,7 +35,12 @@ pub trait FileReader {
 /// Abstract so it can be mocked out for tests.  The real implementation
 /// is RealDiskInterface.
 pub trait DiskInterface: FileReader {
+    /// Create a directory, returning false on failure.
+    fn make_dir(&self, path: &Path) -> Result<(), io::Error>;
 
+    /// Create all the parent directories for path; like mkdir -p
+    /// `basename path`.
+    fn make_dirs(&self, path: &Path) -> Result<(), io::Error>;
 }
 
 /*
@@ -45,8 +50,7 @@ struct DiskInterface: public FileReader {
   /// other errors.
   virtual TimeStamp Stat(const string& path, string* err) const = 0;
 
-  /// Create a directory, returning false on failure.
-  virtual bool MakeDir(const string& path) = 0;
+
 
   /// Create a file, with the specified name and contents
   /// Returns true on success, false on failure
@@ -59,9 +63,7 @@ struct DiskInterface: public FileReader {
   ///          -1 if an error occurs.
   virtual int RemoveFile(const string& path) = 0;
 
-  /// Create all the parent directories for path; like mkdir -p
-  /// `basename path`.
-  bool MakeDirs(const string& path);
+
 };
 
 */
@@ -107,7 +109,7 @@ struct RealDiskInterface : public DiskInterface {
 
 impl FileReader for RealDiskInterface {
     fn read_file(&self, path: &Path, contents: &mut Vec<u8>) -> Result<(), FileReaderError> {
-        let mut file = File::open(path).map_err(|err| {
+        let mut file = fs::File::open(path).map_err(|err| {
             let c = if err.kind() == ErrorKind::NotFound {
                 FileReaderError::NotFound
             } else {
@@ -125,5 +127,17 @@ impl FileReader for RealDiskInterface {
 }
 
 impl DiskInterface for RealDiskInterface {
+    fn make_dir(&self, path: &Path) -> Result<(), io::Error> {
+        fs::DirBuilder::new()
+            .recursive(false)
+            .create(path)?;
+        Ok(())
+    }
 
+    fn make_dirs(&self, path: &Path) -> Result<(), io::Error> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .create(path)?;
+        Ok(())
+    }
 }

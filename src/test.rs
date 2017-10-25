@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::io::{self};
 
 use super::disk_interface::{FileReader, FileReaderError, DiskInterface};
 
@@ -116,7 +117,12 @@ impl FileReader for VirtualFileSystem {
 }
 
 impl DiskInterface for VirtualFileSystem {
-
+    fn make_dir(&self, path: &Path) -> Result<(), io::Error> {
+        unimplemented!{}
+    }
+    fn make_dirs(&self, path: &Path) -> Result<(), io::Error> {
+        unimplemented!{}
+    }
 }
 
 

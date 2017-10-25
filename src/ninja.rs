@@ -24,7 +24,8 @@ use super::build_log::{BuildLog, BuildLogUser};
 use super::deps_log::DepsLog;
 use super::utils::*;
 use super::state::State;
-use super::disk_interface::RealDiskInterface;
+use super::disk_interface::{DiskInterface, RealDiskInterface};
+use super::eval_env::Env;
 use super::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction, PhonyCycleAction};
 use super::version::NINJA_VERSION;
 
@@ -126,7 +127,27 @@ impl<'a> NinjaMain<'a> {
     /// Ensure the build directory exists, creating it if necessary.
     /// @return false on error.
     pub fn ensure_build_dir_exists(&mut self) -> Result<(), ()> {
-        unimplemented!()
+        use std::io::ErrorKind;
+
+        let bindings = self.state.bindings.borrow();
+        let build_dir = bindings.lookup_variable(b"builddir");
+        if !build_dir.is_empty() && !self.config.dry_run {
+            let mut make_dir_bytes = build_dir.clone().into_owned();
+            make_dir_bytes.extend_from_slice(b"/.");
+            let make_dir = pathbuf_from_bytes(make_dir_bytes).map_err(|e| {
+              error!("invalid utf8 pathname {}", String::from_utf8_lossy(&e));
+            })?;
+            self.disk_interface.make_dirs(&make_dir).or_else(|e| {
+              if e.kind() == ErrorKind::AlreadyExists {
+                Ok(())
+              } else {
+                Err(e)
+              }
+            }).map_err(|e| {
+              error!("creating build directory {}: {}", String::from_utf8_lossy(&build_dir), e);
+            })?;
+        }
+        Ok(())
     }
 
     /// Rebuild the manifest, if necessary.

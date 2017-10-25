@@ -358,13 +358,14 @@ pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> 
     let new_len = dst - start;
     let mut slash_bits = 0u64;
     if WINDOWS_PATH {
+        let mut mask = 1u64;
         for i in 0..new_len {
             if path[i] == b'\\' {
-                slash_bits |= 1;
+                slash_bits |= mask;
                 path[i] = b'/';
-                slash_bits <<= 1;
+                mask <<= 1;
             } else if path[i] == b'/' {
-                slash_bits <<= 1;
+                mask <<= 1;
             }
         }
     }
@@ -378,10 +379,10 @@ pub fn decanonicalize_path(path: &[u8], slash_bits: u64) -> Vec<u8> {
     if WINDOWS_PATH {
         let mut mask = 1u64;
         for c in result.iter_mut().filter(|c| **c == b'/') {
-            mask <<= 1;
             if (slash_bits & mask) != 0 {
                 *c = b'\\';
             }
+            mask <<= 1;
         }
     }
     result
