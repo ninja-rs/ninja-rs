@@ -355,7 +355,7 @@ impl<'a> ManifestParser<'a> {
             let mut edge = self.state.edge_state.get_edge_mut(edge_idx);
             edge.env = env.clone();
 
-            let pool_name = edge.get_binding(b"pool").into_owned();
+            let pool_name = edge.get_binding(&self.state.node_state, b"pool").into_owned();
             if !pool_name.is_empty() {
                 let pool = self.state.pool_state.lookup_pool(&pool_name).ok_or_else(|| {
                     lexer.error(&format!("unknown pool name '{}'", String::from_utf8_lossy(&pool_name)))
@@ -452,7 +452,7 @@ impl<'a> ManifestParser<'a> {
         }
 
         // Multiple outputs aren't (yet?) supported with depslog.
-        let deps_type = edge.get_binding(b"deps");
+        let deps_type = edge.get_binding(&self.state.node_state, b"deps");
         if !deps_type.is_empty() && edge.outputs.len() > 1 {
             return Err(lexer.error(
                 concat!(
@@ -663,8 +663,8 @@ mod parser_test {
         let node_idx = state.node_state.lookup_node(b"result").unwrap();
         let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
         let edge = state.edge_state.get_edge(edge_idx);
-        assert_eq!(true, edge.get_binding_bool(b"restat"));
-        assert_eq!(false, edge.get_binding_bool(b"generator"));
+        assert_eq!(true, edge.get_binding_bool(&state.node_state, b"restat"));
+        assert_eq!(false, edge.get_binding_bool(&state.node_state, b"generator"));
     }
 
     #[test]
@@ -708,6 +708,29 @@ mod parser_test {
             rule.get_binding(b"rspfile").unwrap().serialize());
         assert_eq!(b"[$in]".as_ref().to_owned(), 
             rule.get_binding(b"rspfile_content").unwrap().serialize());
+    }
+
+    #[test]
+    fn parsertest_in_newline() {
+        use super::super::graph::EdgeIndex;
+
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "rule cat_rsp\n",
+          "  command = cat $in_newline > $out\n",
+          "\n",
+          "build out: cat_rsp in in2\n",
+          "  rspfile=out.rsp\n").as_bytes());
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(2usize, bindings.get_rules().len());
+        let rule = bindings.get_rules().iter().next().unwrap().1;
+        assert_eq!(b"cat_rsp", rule.name());
+        assert_eq!(b"[cat ][$in_newline][ > ][$out]".as_ref().to_owned(), 
+            rule.get_binding(b"command").unwrap().serialize());
+
+        let edge = state.edge_state.get_edge(EdgeIndex(0));
+        assert_eq!(b"cat in\nin2 > out".as_ref().to_owned(), edge.evaluate_command(&state.node_state));
     }
 /*
 

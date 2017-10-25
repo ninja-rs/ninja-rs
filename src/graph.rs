@@ -17,10 +17,13 @@ use std::cell::{Cell, RefCell};
 use std::borrow::Cow;
 use std::ops::Range;
 
-use super::state::Pool;
+use super::state::{Pool, NodeState};
 use super::state::{PHONY_RULE, CONSOLE_POOL};
 use super::eval_env::{Env, Rule, BindingEnv};
 use super::timestamp::TimeStamp;
+use super::utils::WINDOWS_PATH;
+use super::utils::decanonicalize_path;
+use super::utils::ExtendFromEscapedSlice;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct NodeIndex(pub(crate) usize);
@@ -72,14 +75,6 @@ impl Node {
         }
     }
 
-    pub fn in_edge(&self) -> Option<EdgeIndex> {
-        self.in_edge
-    }
-
-    pub fn set_in_edge(&mut self, edge: Option<EdgeIndex>) {
-        self.in_edge = edge;
-    }
-
     pub fn id(&self) -> isize {
         self.id
     }
@@ -88,6 +83,57 @@ impl Node {
         self.id = id;
     }
 
+    pub fn path(&self) -> &[u8] {
+        &self.path
+    }
+
+    pub fn slash_bits(&self) -> u64 {
+        self.slash_bits
+    }
+
+    pub fn mtime(&self) -> TimeStamp {
+        self.mtime
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn set_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Mark as not-yet-stat()ed and not dirty.
+    pub fn reset_state(&mut self) {
+        self.mtime = TimeStamp(-1);
+        self.dirty = false;
+    }
+
+    /// Mark the Node as already-stat()ed and missing.
+    pub fn mark_missing(&mut self) {
+        self.mtime = TimeStamp(0);
+    }
+
+    pub fn exists(&self) -> bool {
+        self.mtime.0 != 0
+    }
+
+    pub fn status_known(&self) -> bool {
+        self.mtime.0 != -1
+    }
+
+    pub fn in_edge(&self) -> Option<EdgeIndex> {
+        self.in_edge
+    }
+
+    pub fn set_in_edge(&mut self, edge: Option<EdgeIndex>) {
+        self.in_edge = edge;
+    }
+    
     pub fn out_edges(&self) -> &[EdgeIndex] {
         &self.out_edges
     }
@@ -96,22 +142,15 @@ impl Node {
         self.out_edges.push(edge);
     }
 
-    pub fn path(&self) -> &[u8] {
-        &self.path
+    /// Get |path()| but use slash_bits to convert back to original slash styles.
+    pub fn path_decanonicalized(&self) -> Vec<u8> {
+        decanonicalize_path(&self.path, self.slash_bits)
     }
-
 }
 
 /*
 
 struct Node {
-  Node(const string& path, uint64_t slash_bits)
-      : path_(path),
-        slash_bits_(slash_bits),
-        mtime_(-1),
-        dirty_(false),
-        in_edge_(NULL),
-        id_(-1) {}
 
   /// Return false on error.
   bool Stat(DiskInterface* disk_interface, string* err);
@@ -123,38 +162,9 @@ struct Node {
     return Stat(disk_interface, err);
   }
 
-  /// Mark as not-yet-stat()ed and not dirty.
-  void ResetState() {
-    mtime_ = -1;
-    dirty_ = false;
-  }
 
-  /// Mark the Node as already-stat()ed and missing.
-  void MarkMissing() {
-    mtime_ = 0;
-  }
-
-  bool exists() const {
-    return mtime_ != 0;
-  }
-
-  bool status_known() const {
-    return mtime_ != -1;
-  }
-
-  /// Get |path()| but use slash_bits to convert back to original slash styles.
-  string PathDecanonicalized() const {
-    return PathDecanonicalized(path_, slash_bits_);
-  }
   static string PathDecanonicalized(const string& path,
                                     uint64_t slash_bits);
-  uint64_t slash_bits() const { return slash_bits_; }
-
-  TimeStamp mtime() const { return mtime_; }
-
-  bool dirty() const { return dirty_; }
-  void set_dirty(bool dirty) { dirty_ = dirty; }
-  void MarkDirty() { dirty_ = true; }
 
   void Dump(const char* prefix="") const;
 
@@ -226,24 +236,24 @@ impl Edge {
     }    
 
     /// Returns the shell-escaped value of |key|.
-    pub fn get_binding(&self, key: &[u8]) -> Cow<[u8]> {
-        let env = EdgeEnv::new(self, EdgeEnvEscapeKind::ShellEscape);
+    pub fn get_binding(&self, node_state: &NodeState, key: &[u8]) -> Cow<[u8]> {
+        let env = EdgeEnv::new(self, node_state, EdgeEnvEscapeKind::ShellEscape);
         env.lookup_variable(key).into_owned().into()
     }
 
-    pub fn get_binding_bool(&self, key: &[u8]) -> bool {
-        !self.get_binding(key).is_empty()
+    pub fn get_binding_bool(&self, node_state: &NodeState, key: &[u8]) -> bool {
+        !self.get_binding(node_state, key).is_empty()
     }
 
     /// Like GetBinding("depfile"), but without shell escaping.
-    pub fn get_unescaped_depfile(&self) -> Cow<[u8]> {
-        let env = EdgeEnv::new(self, EdgeEnvEscapeKind::DoNotEscape);
+    pub fn get_unescaped_depfile(&self, node_state: &NodeState) -> Cow<[u8]> {
+        let env = EdgeEnv::new(self, node_state, EdgeEnvEscapeKind::DoNotEscape);
         env.lookup_variable(b"depfile").into_owned().into()
     }
 
     /// Like GetBinding("rspfile"), but without shell escaping.
-    pub fn get_unescaped_rspfile(&self) -> Cow<[u8]> {
-        let env = EdgeEnv::new(self, EdgeEnvEscapeKind::DoNotEscape);
+    pub fn get_unescaped_rspfile(&self, node_state: &NodeState) -> Cow<[u8]> {
+        let env = EdgeEnv::new(self, node_state, EdgeEnvEscapeKind::DoNotEscape);
         env.lookup_variable(b"rspfile").into_owned().into()
     }
 
@@ -255,6 +265,25 @@ impl Edge {
     pub fn use_console(&self) -> bool {
         &*self.pool().borrow() as * const Pool ==
           CONSOLE_POOL.with(|x| &*x.borrow() as * const Pool)
+    }
+
+    /// Expand all variables in a command and return it as a string.
+    /// If incl_rsp_file is enabled, the string will also contain the
+    /// full contents of a response file (if applicable)
+    pub fn evaluate_command(&self, node_state: &NodeState) -> Vec<u8> {
+        self.evaluate_command_with_rsp_file(node_state, false)
+    }
+
+    pub fn evaluate_command_with_rsp_file(&self, node_state: &NodeState, incl_rsp_file: bool) -> Vec<u8> {
+        let mut command = self.get_binding(node_state, b"command").into_owned();
+        if incl_rsp_file {
+            let rspfile_content = self.get_binding(node_state, b"rspfile_content");
+            if !rspfile_content.is_empty() {
+                command.extend_from_slice(b";rspfile=");
+                command.extend_from_slice(rspfile_content.as_ref());
+            }
+        }
+        command
     }
 
     pub fn maybe_phonycycle_diagnostic(&self) -> bool {
@@ -279,10 +308,6 @@ struct Edge {
   /// Return true if all inputs' in-edges are ready.
   bool AllInputsReady() const;
 
-  /// Expand all variables in a command and return it as a string.
-  /// If incl_rsp_file is enabled, the string will also contain the
-  /// full contents of a response file (if applicable)
-  string EvaluateCommand(bool incl_rsp_file = false);
 
   void Dump(const char* prefix="") const;
 
@@ -319,9 +344,6 @@ struct Edge {
   bool is_implicit_out(size_t index) const {
     return index >= outputs_.size() - implicit_outs_;
   }
-
-  bool is_phony() const;
-  bool use_console() const;
 
 };
 
@@ -713,18 +735,20 @@ enum EdgeEnvEscapeKind {
 }
 
 /// An Env for an Edge, providing $in and $out.
-struct EdgeEnv<'a> {
+struct EdgeEnv<'a, 'b> {
     lookups: RefCell<Vec<Vec<u8>>>,
     edge: &'a Edge,
+    node_state: &'b NodeState,
     escape_in_out: EdgeEnvEscapeKind,
     recursive: Cell<bool>,
 }
 
-impl<'a> EdgeEnv<'a> {
-    pub fn new(edge: &'a Edge, escape: EdgeEnvEscapeKind) -> Self {
+impl<'a, 'b> EdgeEnv<'a, 'b> {
+    pub fn new(edge: &'a Edge, node_state: &'b NodeState, escape: EdgeEnvEscapeKind) -> Self {
         EdgeEnv {
           lookups: RefCell::new(Vec::new()),
           edge,
+          node_state,
           escape_in_out: escape,
           recursive: Cell::new(false)
         }
@@ -732,20 +756,48 @@ impl<'a> EdgeEnv<'a> {
 
     /// Given a span of Nodes, construct a list of paths suitable for a command
     /// line.
-    pub fn make_path_list(nodes: &[NodeIndex], sep: char) -> Vec<u8> {
-        unimplemented!()
+    pub fn make_path_list(node_state: &NodeState,
+        nodes: &[NodeIndex], sep: u8, escape_in_out: EdgeEnvEscapeKind) -> Vec<u8> {
+
+        let mut result = Vec::new();
+        for node_idx in nodes {
+            if !result.is_empty() {
+                result.push(sep);
+            };
+            let node = node_state.get_node(*node_idx);
+            let path = node.path_decanonicalized();
+            match escape_in_out {
+              EdgeEnvEscapeKind::ShellEscape => {
+                  if WINDOWS_PATH {
+                      result.extend_from_win32_escaped_slice(&path);
+                  } else {
+                      result.extend_from_shell_escaped_slice(&path);
+                  }
+              },
+              EdgeEnvEscapeKind::DoNotEscape => {
+                  result.extend_from_slice(&path);
+              }
+            }
+        }
+        result
     }
 }
 
-impl<'a> Env for EdgeEnv<'a> {
+impl<'a, 'b> Env for EdgeEnv<'a, 'b> {
     fn lookup_variable(&self, var: &[u8]) -> Cow<[u8]> {
         if var == b"in".as_ref() || var == b"in_newline".as_ref() {
-            let sep = if var == b"in".as_ref() { ' ' } else { '\n' };
+            let sep = if var == b"in".as_ref() { b' ' } else { b'\n' };
             let explicit_deps_range = self.edge.explicit_deps_range();
-            return Cow::Owned(EdgeEnv::make_path_list(&self.edge.inputs[explicit_deps_range], sep));
+            return Cow::Owned(EdgeEnv::make_path_list(
+                self.node_state, 
+                &self.edge.inputs[explicit_deps_range], sep,
+                self.escape_in_out));
         } else if var == b"out".as_ref() {
             let explicit_outs_range = self.edge.explicit_outs_range();
-            return Cow::Owned(EdgeEnv::make_path_list(&self.edge.outputs[explicit_outs_range], ' '));
+            return Cow::Owned(EdgeEnv::make_path_list(
+                self.node_state, 
+                &self.edge.outputs[explicit_outs_range], b' ',
+                self.escape_in_out));
         }
 
         if self.recursive.get() {
@@ -776,37 +828,6 @@ impl<'a> Env for EdgeEnv<'a> {
 }
 /*
 
-string EdgeEnv::MakePathList(vector<Node*>::iterator begin,
-                             vector<Node*>::iterator end,
-                             char sep) {
-  string result;
-  for (vector<Node*>::iterator i = begin; i != end; ++i) {
-    if (!result.empty())
-      result.push_back(sep);
-    const string& path = (*i)->PathDecanonicalized();
-    if (escape_in_out_ == kShellEscape) {
-#if _WIN32
-      GetWin32EscapedString(path, &result);
-#else
-      GetShellEscapedString(path, &result);
-#endif
-    } else {
-      result.append(path);
-    }
-  }
-  return result;
-}
-
-string Edge::EvaluateCommand(bool incl_rsp_file) {
-  string command = GetBinding("command");
-  if (incl_rsp_file) {
-    string rspfile_content = GetBinding("rspfile_content");
-    if (!rspfile_content.empty())
-      command += ";rspfile=" + rspfile_content;
-  }
-  return command;
-}
-
 void Edge::Dump(const char* prefix) const {
   printf("%s[ ", prefix);
   for (vector<Node*>::const_iterator i = inputs_.begin();
@@ -828,21 +849,6 @@ void Edge::Dump(const char* prefix) const {
   printf("] 0x%p\n", this);
 }
 
-
-// static
-string Node::PathDecanonicalized(const string& path, uint64_t slash_bits) {
-  string result = path;
-#ifdef _WIN32
-  uint64_t mask = 1;
-  for (char* c = &result[0]; (c = strchr(c, '/')) != NULL;) {
-    if (slash_bits & mask)
-      *c = '\\';
-    c++;
-    mask <<= 1;
-  }
-#endif
-  return result;
-}
 
 void Node::Dump(const char* prefix) const {
   printf("%s <%s 0x%p> mtime: %d%s, (:%s), ",

@@ -270,9 +270,9 @@ static bool IsPathSeparator(char c) {
 */
 
 #[cfg(windows)]
-const WINDOWS_PATH : bool = true;
+pub const WINDOWS_PATH : bool = true;
 #[cfg(not(windows))]
-const WINDOWS_PATH : bool = false;
+pub const WINDOWS_PATH : bool = false;
 
 fn is_path_separator(c: u8) -> bool {
     c == b'/' || WINDOWS_PATH && c == b'\\'
@@ -371,6 +371,27 @@ pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> 
     Ok((new_len, slash_bits))
 }
 
+
+// static
+pub fn decanonicalize_path(path: &[u8], slash_bits: u64) -> Vec<u8> {
+    let mut result = path.to_owned();
+    if WINDOWS_PATH {
+        let mut mask = 1u64;
+        for c in result.iter_mut().filter(|c| **c == b'/') {
+            mask <<= 1;
+            if (slash_bits & mask) != 0 {
+                *c = b'\\';
+            }
+        }
+    }
+    result
+}
+
+pub trait ExtendFromEscapedSlice<T> {
+    fn extend_from_shell_escaped_slice(&mut self, other: &[T]);
+    fn extend_from_win32_escaped_slice(&mut self, other: &[T]);
+}
+
 /*
 static inline bool IsKnownShellSafeCharacter(char ch) {
   if ('A' <= ch && ch <= 'Z') return true;
@@ -388,31 +409,28 @@ static inline bool IsKnownShellSafeCharacter(char ch) {
       return false;
   }
 }
+*/
 
-static inline bool IsKnownWin32SafeCharacter(char ch) {
-  switch (ch) {
-    case ' ':
-    case '"':
-      return false;
-    default:
-      return true;
-  }
+fn is_known_win32_safe_char(ch: u8) -> bool {
+    match ch {
+    b' ' | b'"' => false,
+    _ => true, 
+    }
 }
 
+/*
 static inline bool StringNeedsShellEscaping(const string& input) {
   for (size_t i = 0; i < input.size(); ++i) {
     if (!IsKnownShellSafeCharacter(input[i])) return true;
   }
   return false;
 }
-
-static inline bool StringNeedsWin32Escaping(const string& input) {
-  for (size_t i = 0; i < input.size(); ++i) {
-    if (!IsKnownWin32SafeCharacter(input[i])) return true;
-  }
-  return false;
+*/
+fn slice_needs_win32_escaping(input: &[u8]) -> bool {
+    !input.iter().cloned().all(is_known_win32_safe_char)
 }
 
+/*
 void GetShellEscapedString(const string& input, string* result) {
   assert(result);
 
@@ -474,7 +492,52 @@ void GetWin32EscapedString(const string& input, string* result) {
   result->append(consecutive_backslash_count, kBackslash);
   result->push_back(kQuote);
 }
+*/
 
+impl ExtendFromEscapedSlice<u8> for Vec<u8> {
+    fn extend_from_shell_escaped_slice(&mut self, input: &[u8]) {
+        unimplemented!()
+    }
+    fn extend_from_win32_escaped_slice(&mut self, input: &[u8]) {
+        if !slice_needs_win32_escaping(input) {
+            self.extend_from_slice(input);
+            return;
+        }
+/*
+  const char kQuote = '"';
+  const char kBackslash = '\\';
+
+  result->push_back(kQuote);
+  size_t consecutive_backslash_count = 0;
+  string::const_iterator span_begin = input.begin();
+  for (string::const_iterator it = input.begin(), end = input.end(); it != end;
+       ++it) {
+    switch (*it) {
+      case kBackslash:
+        ++consecutive_backslash_count;
+        break;
+      case kQuote:
+        result->append(span_begin, it);
+        result->append(consecutive_backslash_count + 1, kBackslash);
+        span_begin = it;
+        consecutive_backslash_count = 0;
+        break;
+      default:
+        consecutive_backslash_count = 0;
+        break;
+    }
+  }
+  result->append(span_begin, input.end());
+  result->append(consecutive_backslash_count, kBackslash);
+  result->push_back(kQuote);
+*/
+
+
+        unimplemented!()
+    }
+}
+
+/*
 int ReadFile(const string& path, string* contents, string* err) {
 #ifdef _WIN32
   // This makes a ninja run on a set of 1500 manifest files about 4% faster
