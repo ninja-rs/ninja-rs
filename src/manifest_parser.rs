@@ -529,32 +529,14 @@ impl<'a> ManifestParser<'a> {
 
 }
 
-/*
-
-
-
-
-
-
-bool ManifestParser::ParseDefault(string* err) {
-
-}
-
-bool ManifestParser::ParseEdge(string* err) {
-}
-
-bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
-
-}
-
-*/
-
 #[cfg(test)]
 mod parser_test {
     use super::*;
     use super::super::eval_env::Env;
     use super::super::state::State;
     use super::super::test::VirtualFileSystem;
+    use super::super::graph::EdgeIndex;
+    use super::super::utils::WINDOWS_PATH;
 
     struct ParserTest {
         pub state: RefCell<State>,
@@ -712,8 +694,6 @@ mod parser_test {
 
     #[test]
     fn parsertest_in_newline() {
-        use super::super::graph::EdgeIndex;
-
         let mut parsertest = ParserTest::new();
         parsertest.assert_parse(concat!(
           "rule cat_rsp\n",
@@ -732,84 +712,76 @@ mod parser_test {
         let edge = state.edge_state.get_edge(EdgeIndex(0));
         assert_eq!(b"cat in\nin2 > out".as_ref().to_owned(), edge.evaluate_command(&state.node_state));
     }
-/*
 
+    #[test]
+    fn parsertest_variables() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "l = one-letter-test\n",
+          "rule link\n",
+          "  command = ld $l $extra $with_under -o $out $in\n",
+          "\n",
+          "extra = -pthread\n",
+          "with_under = -under\n",
+          "build a: link b c\n",
+          "nested1 = 1\n",
+          "nested2 = $nested1/2\n",
+          "build supernested: link x\n",
+          "  extra = $nested2/3\n").as_bytes());
+        let state = parsertest.state.borrow();
+        assert_eq!(2usize, state.edge_state.len());
+        let edge0 = state.edge_state.get_edge(EdgeIndex(0));
+        assert_eq!(b"ld one-letter-test -pthread -under -o a b c".as_ref().to_owned(),
+            edge0.evaluate_command(&state.node_state));
 
-TEST_F(ParserTest, InNewline) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat_rsp\n"
-"  command = cat $in_newline > $out\n"
-"\n"
-"build out: cat_rsp in in2\n"
-"  rspfile=out.rsp\n"));
+        let bindings = state.bindings.borrow();
+        assert_eq!(b"1/2".as_ref().to_owned(), bindings.lookup_variable(b"nested2").into_owned());
 
-  ASSERT_EQ(2u, state.bindings_.GetRules().size());
-  const Rule* rule = state.bindings_.GetRules().begin()->second;
-  EXPECT_EQ("cat_rsp", rule->name());
-  EXPECT_EQ("[cat ][$in_newline][ > ][$out]",
-            rule->GetBinding("command")->Serialize());
+        let edge1 = state.edge_state.get_edge(EdgeIndex(1));
+        assert_eq!(b"ld one-letter-test 1/2/3 -under -o supernested x".as_ref().to_owned(),
+            edge1.evaluate_command(&state.node_state));
+    }
 
-  Edge* edge = state.edges_[0];
-  EXPECT_EQ("cat in\nin2 > out", edge->EvaluateCommand());
-}
+    #[test]
+    fn parsertest_variable_scope() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "foo = bar\n",
+          "rule cmd\n",
+          "  command = cmd $foo $in $out\n",
+          "\n",
+          "build inner: cmd a\n",
+          "  foo = baz\n",
+          "build outer: cmd b\n",
+          "\n").as_bytes());  // Extra newline after build line tickles a regression.  
 
-TEST_F(ParserTest, Variables) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"l = one-letter-test\n"
-"rule link\n"
-"  command = ld $l $extra $with_under -o $out $in\n"
-"\n"
-"extra = -pthread\n"
-"with_under = -under\n"
-"build a: link b c\n"
-"nested1 = 1\n"
-"nested2 = $nested1/2\n"
-"build supernested: link x\n"
-"  extra = $nested2/3\n"));
+        let state = parsertest.state.borrow();
+        assert_eq!(2usize, state.edge_state.len());
+        assert_eq!(b"cmd baz a inner".as_ref().to_owned(),
+            state.edge_state.get_edge(EdgeIndex(0)).evaluate_command(&state.node_state));
+        assert_eq!(b"cmd bar b outer".as_ref().to_owned(),
+            state.edge_state.get_edge(EdgeIndex(1)).evaluate_command(&state.node_state));
+    }
 
-  ASSERT_EQ(2u, state.edges_.size());
-  Edge* edge = state.edges_[0];
-  EXPECT_EQ("ld one-letter-test -pthread -under -o a b c",
-            edge->EvaluateCommand());
-  EXPECT_EQ("1/2", state.bindings_.LookupVariable("nested2"));
+    #[test]
+    fn parsertest_continuation() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+          "rule link\n",
+          "  command = foo bar $\n",
+          "    baz\n",
+          "\n",
+          "build a: link c $\n",
+          " d e f\n").as_bytes());
 
-  edge = state.edges_[1];
-  EXPECT_EQ("ld one-letter-test 1/2/3 -under -o supernested x",
-            edge->EvaluateCommand());
-}
-
-TEST_F(ParserTest, VariableScope) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"foo = bar\n"
-"rule cmd\n"
-"  command = cmd $foo $in $out\n"
-"\n"
-"build inner: cmd a\n"
-"  foo = baz\n"
-"build outer: cmd b\n"
-"\n"  // Extra newline after build line tickles a regression.
-));
-
-  ASSERT_EQ(2u, state.edges_.size());
-  EXPECT_EQ("cmd baz a inner", state.edges_[0]->EvaluateCommand());
-  EXPECT_EQ("cmd bar b outer", state.edges_[1]->EvaluateCommand());
-}
-
-TEST_F(ParserTest, Continuation) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule link\n"
-"  command = foo bar $\n"
-"    baz\n"
-"\n"
-"build a: link c $\n"
-" d e f\n"));
-
-  ASSERT_EQ(2u, state.bindings_.GetRules().size());
-  const Rule* rule = state.bindings_.GetRules().begin()->second;
-  EXPECT_EQ("link", rule->name());
-  EXPECT_EQ("[foo bar baz]", rule->GetBinding("command")->Serialize());
-}
-*/
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(2usize, bindings.get_rules().len());
+        let rule = bindings.get_rules().iter().next().unwrap().1;
+        assert_eq!(b"link", rule.name());
+        assert_eq!(b"[foo bar baz]".as_ref().to_owned(), 
+            rule.get_binding(b"command").unwrap().serialize());
+    }
 
     #[test]
     fn parsertest_backslash() {
@@ -835,36 +807,48 @@ TEST_F(ParserTest, Continuation) {
         let bindings = state.bindings.borrow();
         assert_eq!(b"not # a comment".as_ref(), bindings.lookup_variable(b"foo").as_ref());
     }
+
+    #[test]
+    fn parsertest_dollars() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule foo\n",
+            "  command = ${out}bar$$baz$$$\n",
+            "blah\n",
+            "x = $$dollar\n",
+            "build $x: foo y\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        let bindings = state.bindings.borrow();
+        assert_eq!(b"$dollar".as_ref(), bindings.lookup_variable(b"x").as_ref());
+        if WINDOWS_PATH {
+            assert_eq!(b"$dollarbar$baz$blah".as_ref().to_owned(), 
+              state.edge_state.get_edge(EdgeIndex(0)).evaluate_command(&state.node_state));
+        } else {
+            assert_eq!(b"'$dollar'bar$baz$blah".as_ref().to_owned(), 
+              state.edge_state.get_edge(EdgeIndex(0)).evaluate_command(&state.node_state));            
+        }
+    }
+
+    #[test]
+    fn parsertest_escape_spaces() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule spaces\n",
+            "  command = something\n",
+            "build foo$ bar: spaces $$one two$$$ three\n").as_bytes());
+        
+        let state = parsertest.state.borrow();
+        assert!(state.node_state.lookup_node(b"foo bar").is_some());
+        let edge0 = state.edge_state.get_edge(EdgeIndex(0));
+        assert_eq!(state.node_state.get_node(edge0.outputs[0]).path(), b"foo bar".as_ref());
+        assert_eq!(state.node_state.get_node(edge0.inputs[0]).path(), b"$one".as_ref());
+        assert_eq!(state.node_state.get_node(edge0.inputs[1]).path(), b"two$ three".as_ref());
+        assert_eq!(edge0.evaluate_command(&state.node_state), b"something".as_ref().to_owned());
+    }
+
+    
 /*
-
-TEST_F(ParserTest, Dollars) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule foo\n"
-"  command = ${out}bar$$baz$$$\n"
-"blah\n"
-"x = $$dollar\n"
-"build $x: foo y\n"
-));
-  EXPECT_EQ("$dollar", state.bindings_.LookupVariable("x"));
-#ifdef _WIN32
-  EXPECT_EQ("$dollarbar$baz$blah", state.edges_[0]->EvaluateCommand());
-#else
-  EXPECT_EQ("'$dollar'bar$baz$blah", state.edges_[0]->EvaluateCommand());
-#endif
-}
-
-TEST_F(ParserTest, EscapeSpaces) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule spaces\n"
-"  command = something\n"
-"build foo$ bar: spaces $$one two$$$ three\n"
-));
-  EXPECT_TRUE(state.LookupNode("foo bar"));
-  EXPECT_EQ(state.edges_[0]->outputs_[0]->path(), "foo bar");
-  EXPECT_EQ(state.edges_[0]->inputs_[0]->path(), "$one");
-  EXPECT_EQ(state.edges_[0]->inputs_[1]->path(), "two$ three");
-  EXPECT_EQ(state.edges_[0]->EvaluateCommand(), "something");
-}
 
 TEST_F(ParserTest, CanonicalizeFile) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(

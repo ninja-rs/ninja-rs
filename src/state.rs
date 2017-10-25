@@ -248,6 +248,10 @@ impl EdgeState {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.edges.len()
+    }
+
     pub fn get_edge(&self, idx: EdgeIndex) -> &Edge {
         self.edges.get(idx.0).expect("index out of range")
     }
