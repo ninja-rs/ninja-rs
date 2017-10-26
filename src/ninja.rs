@@ -19,11 +19,12 @@ use std::path::{Path, PathBuf};
 use clap::{App, AppSettings, SubCommand, Arg, ArgMatches};
 
 use super::debug_flags::*;
-use super::build::{BuildConfig, BuildConfigVerbosity};
+use super::build::{BuildConfig, BuildConfigVerbosity, Builder};
 use super::build_log::{BuildLog, BuildLogUser};
 use super::deps_log::DepsLog;
 use super::utils::*;
 use super::state::State;
+use super::graph::NodeIndex;
 use super::disk_interface::{DiskInterface, RealDiskInterface};
 use super::eval_env::Env;
 use super::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction, PhonyCycleAction};
@@ -94,7 +95,7 @@ struct NinjaMain<'a> {
     /// Functions for accesssing the disk.
     disk_interface: RealDiskInterface,
     /// The build directory, used for storing the build log etc.
-    build_dir: String,
+    build_dir: Vec<u8>,
     build_log: BuildLog<'a>,
     deps_log: DepsLog,
 }
@@ -106,7 +107,7 @@ impl<'a> NinjaMain<'a> {
             config,
             state: State::new(),
             disk_interface: RealDiskInterface{},
-            build_dir: String::new(),
+            build_dir: Vec::new(),
             build_log: BuildLog::new(),
             deps_log: DepsLog::new(),
         }
@@ -115,13 +116,71 @@ impl<'a> NinjaMain<'a> {
     /// Open the build log.
     /// @return false on error.
     pub fn open_build_log(&mut self, recompact_only: bool) -> Result<(), ()> {
-        unimplemented!()
+        let mut log_path = self.build_dir.clone();
+        if log_path.is_empty() {
+            log_path.extend_from_slice(b"/");
+            log_path.extend_from_slice(b".ninja_log");
+        }
+
+        let log_path = pathbuf_from_bytes(log_path).map_err(|e| {
+            error!("invalid utf-8 filename {}", String::from_utf8_lossy(&e));
+        })?;
+
+        if let Some(warn) = self.build_log.load(&log_path).map_err(|e| {
+            error!("loading build log {}: {}", log_path.display(), e);
+        })? {
+            warning!("{}", warn);
+        }
+
+        if recompact_only {
+            self.build_log.recompact(&log_path, self).map_err(|e| {
+                error!("failed recompaction: {}", e);
+            })?;
+            return Ok(());
+        }
+        
+        if !self.config.dry_run {
+            self.build_log.open_for_write(&log_path, self).map_err(|e| {
+                error!("opening build log: {}", e);
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Open the deps log: load it, then open for writing.
     /// @return false on error.
     pub fn open_deps_log(&mut self, recompact_only: bool) -> Result<(), ()> {
-        unimplemented!()
+        let mut log_path = self.build_dir.clone();
+        if log_path.is_empty() {
+            log_path.extend_from_slice(b"/");
+            log_path.extend_from_slice(b".ninja_deps");
+        }
+
+        let log_path = pathbuf_from_bytes(log_path).map_err(|e| {
+            error!("invalid utf-8 filename {}", String::from_utf8_lossy(&e));
+        })?;
+
+        if let Some(warn) = self.deps_log.load(&log_path, &mut self.state).map_err(|e| {
+            error!("loading deps log {}: {}", log_path.display(), e);
+        })? {
+            warning!("{}", warn);
+        }
+
+        if recompact_only {
+            self.deps_log.recompact(&log_path).map_err(|e| {
+                error!("failed recompaction: {}", e);
+            })?;
+            return Ok(());
+        }
+        
+        if !self.config.dry_run {
+            self.deps_log.open_for_write(&log_path).map_err(|e| {
+                error!("opening deps log: {}", e);
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Ensure the build directory exists, creating it if necessary.
@@ -130,9 +189,9 @@ impl<'a> NinjaMain<'a> {
         use std::io::ErrorKind;
 
         let bindings = self.state.bindings.borrow();
-        let build_dir = bindings.lookup_variable(b"builddir");
-        if !build_dir.is_empty() && !self.config.dry_run {
-            let mut make_dir_bytes = build_dir.clone().into_owned();
+        self.build_dir = bindings.lookup_variable(b"builddir").into_owned();
+        if !self.build_dir.is_empty() && !self.config.dry_run {
+            let mut make_dir_bytes = self.build_dir.clone();
             make_dir_bytes.extend_from_slice(b"/.");
             let make_dir = pathbuf_from_bytes(make_dir_bytes).map_err(|e| {
               error!("invalid utf8 pathname {}", String::from_utf8_lossy(&e));
@@ -144,7 +203,7 @@ impl<'a> NinjaMain<'a> {
                 Err(e)
               }
             }).map_err(|e| {
-              error!("creating build directory {}: {}", String::from_utf8_lossy(&build_dir), e);
+              error!("creating build directory {}: {}", String::from_utf8_lossy(&self.build_dir), e);
             })?;
         }
         Ok(())
@@ -154,13 +213,137 @@ impl<'a> NinjaMain<'a> {
     /// Fills in \a err on error.
     /// @return true if the manifest was rebuilt.
     pub fn rebuild_manifest(&mut self, input_file: &std::path::Path) -> Result<bool, String> {
-        unimplemented!()
+        let mut path = input_file.to_string_lossy().into_owned().into_bytes();
+        let _ = canonicalize_path(&mut path)?;
+
+        let node_idx = self.state.node_state.lookup_node(&path);
+        if node_idx.is_none() {
+            return Ok(false);
+        }
+        let node_idx = node_idx.unwrap();
+
+        {
+            let mut builder = Builder::new(&self.state, &self.config, 
+                &self.build_log, &self.deps_log, &self.disk_interface);
+
+            builder.add_target(node_idx)?;
+
+            if builder.is_already_up_to_date() {
+                return Ok(false); // Not an error, but we didn't rebuild.
+            }
+
+            builder.build()?;
+        }
+
+        // The manifest was only rebuilt if it is now dirty (it may have been cleaned
+        // by a restat).
+        if !self.state.node_state.get_node(node_idx).is_dirty() {
+          // Reset the state to prevent problems like
+          // https://github.com/ninja-build/ninja/issues/874
+          self.state.reset();
+          return Ok(false);
+        }
+
+        return Ok(true);
+    }
+
+    /// Get the Node for a given command-line path, handling features like
+    /// spell correction.
+    fn collect_target(&self, cpath: &[u8]) -> Result<NodeIndex, String> {
+        let mut path = cpath.to_owned();
+        let slash_bits = canonicalize_path(&mut path)?;
+        
+        // Special syntax: "foo.cc^" means "the first output of foo.cc".
+        let mut first_dependent = false;
+        if path.last() == Some(&b'^') {
+            path.pop();
+            first_dependent = true;
+        }
+
+        match self.state.node_state.lookup_node(&path) {
+          None => {
+              let mut err = format!("unknown target '{}'", 
+                  String::from_utf8_lossy(&decanonicalize_path(&path, slash_bits)));
+              if &path == b"clean" {
+                  err += ", did you mean 'ninja -t clean'?";
+              } else if &path == b"help" {
+                  err += ", did you mean 'ninja -h'?";
+              } else if let Some(suggestion) = self.state.spellcheck_node(&path) {
+                  err += &format!(", did you mean '{}'?", String::from_utf8_lossy(suggestion));
+              };
+              return Err(err);
+          },
+          Some(node_idx) => {
+              if first_dependent {
+                  let out_edge_idx = self.state.node_state.get_node(node_idx)
+                        .out_edges().first().cloned().ok_or_else(|| {
+                          format!("'{}' has no out edge", String::from_utf8_lossy(&path))})?;
+                  let output_node_idx = self.state.edge_state.get_edge(out_edge_idx)
+                        .outputs.first().cloned();
+                  let output_node_idx = output_node_idx.ok_or_else(|| {
+                      self.state.edge_state.get_edge(out_edge_idx).dump();
+                      format!("edge has no outputs")
+                  })?;
+                  return Ok(output_node_idx);
+              }
+              return Ok(node_idx);
+          }
+        }
+    }
+
+    /// CollectTarget for all command-line arguments, filling in \a targets.
+    fn collect_targets_from_args(&self, args: ArgMatches<'static>) 
+            -> Result<Vec<NodeIndex>, String> {
+        if let Some(inputs_value) = args.values_of_lossy("TARGET") {
+            let mut result = Vec::new();
+            for input_value in inputs_value.into_iter().map(String::into_bytes) {
+                let node_idx = self.collect_target(&input_value)?;
+                result.push(node_idx);
+            }
+            Ok(result)
+        } else {
+            self.state.default_nodes()
+        }
     }
 
     /// Build the targets listed on the command line.
     /// @return an exit code.
-    pub fn run_build(&mut self) -> Result<(), isize> {
-        unimplemented!();
+    pub fn run_build(&mut self, args: ArgMatches<'static>) -> Result<(), isize> {
+        let targets = self.collect_targets_from_args(args).map_err(|e| {
+            error!("{}", e);
+            return 1isize;
+        })?;
+
+        self.disk_interface.allow_stat_cache(EXPERIMENTAL_STATCACHE);
+
+        let mut builder = Builder::new(&self.state, &self.config, 
+            &self.build_log, &self.deps_log, &self.disk_interface);
+
+        for target in targets.into_iter() {
+            let _ = builder.add_target(target).map_err(|e| {
+              error!("{}", e);
+              return 1isize;
+            })?;
+            // If _ is false, it's adding a target that is already up-to-date; not really
+            // an error.
+        }
+
+        self.disk_interface.allow_stat_cache(false);
+
+        if builder.is_already_up_to_date() {
+            print!("ninja: no work to do.\n");
+            return Ok(());
+        }
+
+        builder.build().map_err(|e| {
+            print!("ninja: build stopped: {}.\n", e);
+            if e.find("interrupted by user").is_some() {
+                return 2isize;
+            }
+            return 1isize;
+        })?;
+
+        Ok(())
     }
 
     /// Dump the output requested by '-d stats'.
@@ -452,7 +635,7 @@ pub fn ninja_entry() -> Result<(), isize> {
     let ninja_command: PathBuf = 
         std::env::args_os().next().map(Into::into).unwrap_or_default();
 
-    read_flags(&mut options, &mut config)?;
+    let args = read_flags(&mut options, &mut config)?;
     if let Some(working_dir) = options.working_dir.as_ref() {
         // The formatting of this string, complete with funny quotes, is
         // so Emacs can properly identify that the cwd has changed for
@@ -525,7 +708,7 @@ pub fn ninja_entry() -> Result<(), isize> {
                 return Err(1);
             }
         }
-        let result = ninja.run_build();
+        let result = ninja.run_build(args);
         if METRICS.is_some() {
             ninja.dump_metrics(); 
         }
@@ -583,39 +766,6 @@ void CreateWin32MiniDump(_EXCEPTION_POINTERS* pep);
 
 namespace {
 
-/// Rebuild the build manifest, if necessary.
-/// Returns true if the manifest was rebuilt.
-bool NinjaMain::RebuildManifest(const char* input_file, string* err) {
-  string path = input_file;
-  uint64_t slash_bits;  // Unused because this path is only used for lookup.
-  if (!CanonicalizePath(&path, &slash_bits, err))
-    return false;
-  Node* node = state_.LookupNode(path);
-  if (!node)
-    return false;
-
-  Builder builder(&state_, config_, &build_log_, &deps_log_, &disk_interface_);
-  if (!builder.AddTarget(node, err))
-    return false;
-
-  if (builder.AlreadyUpToDate())
-    return false;  // Not an error, but we didn't rebuild.
-
-  if (!builder.Build(err))
-    return false;
-
-  // The manifest was only rebuilt if it is now dirty (it may have been cleaned
-  // by a restat).
-  if (!node->dirty()) {
-    // Reset the state to prevent problems like
-    // https://github.com/ninja-build/ninja/issues/874
-    state_.Reset();
-    return false;
-  }
-
-  return true;
-}
-
 Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
   string path = cpath;
   uint64_t slash_bits;
@@ -661,21 +811,7 @@ Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
   }
 }
 
-bool NinjaMain::CollectTargetsFromArgs(int argc, char* argv[],
-                                       vector<Node*>* targets, string* err) {
-  if (argc == 0) {
-    *targets = state_.DefaultNodes(err);
-    return err->empty();
-  }
 
-  for (int i = 0; i < argc; ++i) {
-    Node* node = CollectTarget(argv[i], err);
-    if (node == NULL)
-      return false;
-    targets->push_back(node);
-  }
-  return true;
-}
 
 int NinjaMain::ToolGraph(const Options* options, int argc, char* argv[]) {
   vector<Node*> nodes;
@@ -1148,74 +1284,6 @@ const Tool* ChooseTool(const string& tool_name) {
     Fatal("unknown tool '%s'", tool_name.c_str());
   }
   return NULL;  // Not reached.
-}
-
-bool NinjaMain::OpenBuildLog(bool recompact_only) {
-  string log_path = ".ninja_log";
-  if (!build_dir_.empty())
-    log_path = build_dir_ + "/" + log_path;
-
-  string err;
-  if (!build_log_.Load(log_path, &err)) {
-    Error("loading build log %s: %s", log_path.c_str(), err.c_str());
-    return false;
-  }
-  if (!err.empty()) {
-    // Hack: Load() can return a warning via err by returning true.
-    Warning("%s", err.c_str());
-    err.clear();
-  }
-
-  if (recompact_only) {
-    bool success = build_log_.Recompact(log_path, *this, &err);
-    if (!success)
-      Error("failed recompaction: %s", err.c_str());
-    return success;
-  }
-
-  if (!config_.dry_run) {
-    if (!build_log_.OpenForWrite(log_path, *this, &err)) {
-      Error("opening build log: %s", err.c_str());
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/// Open the deps log: load it, then open for writing.
-/// @return false on error.
-bool NinjaMain::OpenDepsLog(bool recompact_only) {
-  string path = ".ninja_deps";
-  if (!build_dir_.empty())
-    path = build_dir_ + "/" + path;
-
-  string err;
-  if (!deps_log_.Load(path, &state_, &err)) {
-    Error("loading deps log %s: %s", path.c_str(), err.c_str());
-    return false;
-  }
-  if (!err.empty()) {
-    // Hack: Load() can return a warning via err by returning true.
-    Warning("%s", err.c_str());
-    err.clear();
-  }
-
-  if (recompact_only) {
-    bool success = deps_log_.Recompact(path, &err);
-    if (!success)
-      Error("failed recompaction: %s", err.c_str());
-    return success;
-  }
-
-  if (!config_.dry_run) {
-    if (!deps_log_.OpenForWrite(path, &err)) {
-      Error("opening deps log: %s", err.c_str());
-      return false;
-    }
-  }
-
-  return true;
 }
 
 void NinjaMain::DumpMetrics() {

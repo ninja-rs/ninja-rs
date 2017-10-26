@@ -349,10 +349,10 @@ impl<'a> ManifestParser<'a> {
         
         let env = edge_env.as_ref().unwrap_or(&self.env).clone();
 
-        let mut edge_idx = self.state.edge_state.make_edge(rule, self.state.bindings.clone());
+        let edge_idx = self.state.edge_state.make_edge(rule, self.state.bindings.clone());
         let mut edge_revoked = false;
         {
-            let mut edge = self.state.edge_state.get_edge_mut(edge_idx);
+            let edge = self.state.edge_state.get_edge_mut(edge_idx);
             edge.env = env.clone();
 
             let pool_name = edge.get_binding(&self.state.node_state, b"pool").into_owned();
@@ -372,7 +372,7 @@ impl<'a> ManifestParser<'a> {
                 })?;
 
                 let out_node_idx = self.state.node_state.prepare_node(&path, slash_bits);
-                let mut out_node = self.state.node_state.get_node_mut(out_node_idx);
+                let out_node = self.state.node_state.get_node_mut(out_node_idx);
 
                 if !State::connect_edge_to_out_node(edge, edge_idx, out_node, out_node_idx) {
                   match self.options.dupe_edge_action {
@@ -1459,7 +1459,7 @@ TEST_F(ParserTest, Errors) {
 
     #[test]
     fn parsertest_missing_input() {
-        let mut parsertest = ParserTest::new();
+        let parsertest = ParserTest::new();
 
         let mut state = parsertest.state.borrow_mut();
         let mut parser = ManifestParser::new(&mut state, &parsertest.fs, Default::default());

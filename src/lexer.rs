@@ -236,7 +236,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
     /// Read a simple identifier (a rule or variable name).
     /// Returns false if a name can't be read.
     pub fn read_ident(&mut self, message: &str) -> Result<&[u8], String> {
-        let mut rest_input = &self.input[self.offset..];
+        let rest_input = &self.input[self.offset..];
         named!(read_ident_token,
             take_while1!(is_varname_char));
         let (i, v) = match read_ident_token(rest_input) {

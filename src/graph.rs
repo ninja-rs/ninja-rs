@@ -17,7 +17,10 @@ use std::cell::{Cell, RefCell};
 use std::borrow::Cow;
 use std::ops::Range;
 
-use super::state::{Pool, NodeState};
+use super::state::{Pool, State, NodeState};
+use super::build_log::BuildLog;
+use super::deps_log::DepsLog;
+use super::disk_interface::DiskInterface;
 use super::state::{PHONY_RULE, CONSOLE_POOL};
 use super::eval_env::{Env, Rule, BindingEnv};
 use super::timestamp::TimeStamp;
@@ -173,7 +176,7 @@ private:
 */
 
 
-enum EdgeVisitMark {
+pub enum EdgeVisitMark {
   VisitNone,
   VisitInStack,
   VisitDone
@@ -186,8 +189,8 @@ pub struct Edge {
     pub inputs: Vec<NodeIndex>,
     pub outputs: Vec<NodeIndex>,
     pub env: Rc<RefCell<BindingEnv>>,
-    mark: EdgeVisitMark,
-    outputs_ready: bool,
+    pub mark: EdgeVisitMark,
+    pub outputs_ready: bool,
     deps_missing: bool,
     pub implicit_deps: usize,
     pub order_only_deps: usize,
@@ -293,6 +296,10 @@ impl Edge {
         self.is_phony() && self.outputs.len() == 1 && 
           self.implicit_outs == 0 && self.implicit_deps == 0
     }
+
+    pub fn dump(&self) {
+        unimplemented!();
+    }
 }
 
 
@@ -387,9 +394,35 @@ struct ImplicitDepLoader {
   DepsLog* deps_log_;
 };
 
+*/
 
 /// DependencyScan manages the process of scanning the files in a graph
 /// and updating the dirty/outputs_ready state of all the nodes and edges.
+pub struct DependencyScan {
+
+}
+
+impl DependencyScan {
+    pub fn new(state: &State, build_log: &BuildLog, deps_log: &DepsLog, disk_interface: &DiskInterface) -> Self {
+        DependencyScan {
+
+        }
+    }
+
+    /// Update the |dirty_| state of the given node by inspecting its input edge.
+    /// Examine inputs, outputs, and command lines to judge whether an edge
+    /// needs to be re-run, and update outputs_ready_ and each outputs' |dirty_|
+    /// state accordingly.
+    /// Returns false on failure.
+    pub fn recompute_dirty(&self, node: NodeIndex) -> Result<(), String> {
+        unimplemented!{}
+    }
+
+
+}
+
+/*
+
 struct DependencyScan {
   DependencyScan(State* state, BuildLog* build_log, DepsLog* deps_log,
                  DiskInterface* disk_interface)
@@ -438,9 +471,6 @@ struct DependencyScan {
 
 */
 
-
-struct DependencyScan {
-}
 
 
 /*

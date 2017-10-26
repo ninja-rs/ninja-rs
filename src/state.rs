@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, BTreeSet};
 use std::cmp::{PartialOrd, Ordering};
 
 use super::eval_env::{BindingEnv, Rule};
-use super::graph::{Edge, Node, EdgeIndex, NodeIndex};
+use super::graph::{Edge, Node, EdgeIndex, NodeIndex, EdgeVisitMark};
 
 struct DelayedEdge<'a>(pub &'a Edge);
 
@@ -233,7 +233,7 @@ impl NodeState {
 
     pub fn get_node_mut(&mut self, idx: NodeIndex) -> &mut Node {
         self.nodes.get_mut(idx.0).expect("index out of range")
-    }
+    }    
 }
 
 pub struct EdgeState {
@@ -305,7 +305,7 @@ pub struct State {
     pub pool_state: PoolState,
 
     pub bindings: Rc<RefCell<BindingEnv>>,
-    defaults: Vec<NodeIndex>,
+    defaults: Option<Vec<NodeIndex>>,
 }
 
 impl State {
@@ -315,7 +315,7 @@ impl State {
             edge_state: EdgeState::new(),
             pool_state: PoolState::new(),
             bindings: Rc::new(RefCell::new(BindingEnv::new())),
-            defaults: Vec::new()
+            defaults: None
         };
 
         state.bindings.borrow_mut().add_rule(PHONY_RULE.with(Rc::clone));
@@ -345,11 +345,52 @@ impl State {
     pub fn add_default(&mut self, path: &[u8]) -> Result<(), String> {
         let node = self.node_state.lookup_node(path);
         if let Some(node_idx) = node {
-            self.defaults.push(node_idx);
+            self.defaults.get_or_insert_with(Default::default).push(node_idx);
             Ok(())
         } else {
             Err(format!("unknown target '{}'", String::from_utf8_lossy(path)))
         }
+    }
+
+    pub fn root_nodes(&self) -> Result<Vec<NodeIndex>, String> {
+        let mut root_nodes = Vec::new();
+        // Search for nodes with no output.
+        if !self.edge_state.edges.is_empty() {
+            for edge in self.edge_state.edges.iter() {
+                for out_idx in edge.outputs.iter().cloned() {
+                    if self.node_state.get_node(out_idx).out_edges().is_empty() {
+                        root_nodes.push(out_idx);
+                    }
+                }
+            }
+            if root_nodes.is_empty() {
+                return Err("could not determine root nodes of build graph".to_owned());
+            }
+        }
+        return Ok(root_nodes);
+    }
+
+    pub fn default_nodes(&self) -> Result<Vec<NodeIndex>, String> {
+        if let Some(ref defaults) = self.defaults {
+            Ok(defaults.clone())
+        } else {
+            self.root_nodes()
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for node in self.node_state.nodes.iter_mut() {
+            node.reset_state();
+        }
+
+        for edge in self.edge_state.edges.iter_mut() {
+            edge.outputs_ready = false;
+            edge.mark = EdgeVisitMark::VisitNone;
+        }
+    }
+
+    pub fn spellcheck_node(&self, path: &[u8]) -> Option<&[u8]> {
+        unimplemented!()
     }
 }
 
@@ -486,51 +527,7 @@ Node* State::SpellcheckNode(const string& path) {
   return result;
 }
 
-void State::AddIn(Edge* edge, StringPiece path, uint64_t slash_bits) {
-  Node* node = GetNode(path, slash_bits);
-  edge->inputs_.push_back(node);
-  node->AddOutEdge(edge);
-}
 
-bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits) {
-  Node* node = GetNode(path, slash_bits);
-  if (node->in_edge())
-    return false;
-  edge->outputs_.push_back(node);
-  node->set_in_edge(edge);
-  return true;
-}
-
-vector<Node*> State::RootNodes(string* err) const {
-  vector<Node*> root_nodes;
-  // Search for nodes with no output.
-  for (vector<Edge*>::const_iterator e = edges_.begin();
-       e != edges_.end(); ++e) {
-    for (vector<Node*>::const_iterator out = (*e)->outputs_.begin();
-         out != (*e)->outputs_.end(); ++out) {
-      if ((*out)->out_edges().empty())
-        root_nodes.push_back(*out);
-    }
-  }
-
-  if (!edges_.empty() && root_nodes.empty())
-    *err = "could not determine root nodes of build graph";
-
-  return root_nodes;
-}
-
-vector<Node*> State::DefaultNodes(string* err) const {
-  return defaults_.empty() ? RootNodes(err) : defaults_;
-}
-
-void State::Reset() {
-  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i)
-    i->second->ResetState();
-  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e) {
-    (*e)->outputs_ready_ = false;
-    (*e)->mark_ = Edge::VisitNone;
-  }
-}
 
 void State::Dump() {
   for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i) {

@@ -84,8 +84,8 @@ pub fn exit() -> ! {
 
     // On Windows, some tools may inject extra threads.
     // exit() may block on locks held by those threads, so forcibly exit.
-    std::io::stderr().flush();
-    std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let _ = std::io::stdout().flush();
     unsafe {
         kernel32::ExitProcess(1);
     }

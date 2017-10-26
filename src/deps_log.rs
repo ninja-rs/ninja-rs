@@ -1,3 +1,21 @@
+// Copyright 2012 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::path::Path;
+
+use super::state::State;
+
 /// As build commands run they can output extra dependency information
 /// (e.g. header dependencies for C source) dynamically.  DepsLog collects
 /// that information at build time and uses it for subsequent builds.
@@ -40,6 +58,20 @@ pub struct DepsLog {}
 impl DepsLog {
     pub fn new() -> Self {
         DepsLog{}
+    }
+
+    pub fn load(&mut self, path: &Path, state: &mut State) -> Result<Option<String>, String> {
+        return Ok(None);
+        unimplemented!{}
+    }
+
+    pub fn open_for_write(&self, path: &Path) -> Result<(), String> {
+        return Ok(());
+        unimplemented!()
+    }
+
+    pub fn recompact(&self, path: &Path) -> Result<(), String> {
+        unimplemented!()
     }
 }
 

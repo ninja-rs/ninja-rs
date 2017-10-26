@@ -17,6 +17,7 @@ extern crate num_cpus;
 mod utils;
 #[cfg(test)]
 mod test;
+mod exit_status;
 mod build;
 mod graph;
 mod build_log;
@@ -32,9 +33,6 @@ mod disk_interface;
 mod metrics;
 mod state;
 mod ninja;
-
-use libc::{c_char, c_int};
-use std::ffi::CString;
 
 fn main() {
     let errcode = ninja::ninja_entry().err().unwrap_or(0);

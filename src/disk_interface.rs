@@ -88,8 +88,7 @@ struct RealDiskInterface : public DiskInterface {
   virtual Status ReadFile(const string& path, string* contents, string* err);
   virtual int RemoveFile(const string& path);
 
-  /// Whether stat information can be cached.  Only has an effect on Windows.
-  void AllowStatCache(bool allow);
+
 
  private:
 #ifdef _WIN32
@@ -139,5 +138,13 @@ impl DiskInterface for RealDiskInterface {
             .recursive(true)
             .create(path)?;
         Ok(())
+    }
+}
+
+impl RealDiskInterface {
+    /// Whether stat information can be cached.  Only has an effect on Windows.
+    pub fn allow_stat_cache(&mut self, allow: bool) {
+        return;
+        unimplemented!()
     }
 }

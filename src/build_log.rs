@@ -18,6 +18,7 @@ use super::graph::Edge;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 
 /// Can answer questions about the manifest for the BuildLog.
 pub trait BuildLogUser {
@@ -49,7 +50,8 @@ impl<'a> BuildLog<'a> {
         }
     }
 
-    pub fn open_for_write<User: BuildLogUser>(&mut self, path: &str, user: &User) -> Result<(), String> {
+    pub fn open_for_write<User: BuildLogUser>(&self, path: &Path, user: &User) -> Result<(), String> {
+        return Ok(());
         unimplemented!()
     }
 
@@ -66,7 +68,8 @@ impl<'a> BuildLog<'a> {
     }
 
     /// Load the on-disk log.
-    pub fn load(&mut self, path: &str) -> Result<(), String> {
+    pub fn load(&mut self, path: &Path) -> Result<Option<String>, String> {
+        return Ok(None);
         unimplemented!{}
     }
 
@@ -81,7 +84,7 @@ impl<'a> BuildLog<'a> {
     }
 
     /// Rewrite the known log entries, throwing away old data.
-    pub fn recompact<User: BuildLogUser>(&self, path: &str, user: &User) -> Result<(), String> {
+    pub fn recompact<User: BuildLogUser>(&self, path: &Path, user: &User) -> Result<(), String> {
         unimplemented!()
     }
 
