@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::btree_map::{self, BTreeMap};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use super::state::State;
 use super::deps_log::DepsLog;
@@ -21,10 +21,14 @@ use super::disk_interface::DiskInterface;
 use super::graph::{NodeIndex, EdgeIndex, DependencyScan};
 use super::exit_status::ExitStatus;
 
+pub enum EdgeResult {
+  EdgeFailed,
+  EdgeSucceeded
+}
+
 /// Plan stores the state of a build plan: what we intend to build,
 /// which steps we're ready to execute.
-pub struct Plan<'a> {
-    state: &'a State,
+pub struct Plan {
     wanted_edges: usize,
     command_edges: usize,
 
@@ -34,6 +38,7 @@ pub struct Plan<'a> {
     /// might want to build one of its dependents.  If the entry maps to true, we
     /// want to build it.
     want: BTreeMap<EdgeIndex, bool>,
+    ready: BTreeSet<EdgeIndex>,
 }
 
 trait IsVacant {
@@ -50,32 +55,32 @@ impl<'a, K, V> IsVacant for btree_map::Entry<'a, K, V> {
 }
 
 
-impl<'a> Plan<'a> {
-    pub fn new(state: &'a State) -> Self {
+impl Plan {
+    pub fn new() -> Self {
         Plan {
-          state,
           wanted_edges: 0usize,
           command_edges: 0usize,
           want: BTreeMap::new(),
+          ready: BTreeSet::new(),
         }
     }
 
     /// Add a target to our plan (including all its dependencies).
     /// Returns false if we don't need to build this target; may
     /// fill in |err| with an error message if there's a problem.
-    pub fn add_target(&mut self, node: NodeIndex) -> Result<bool, String> {
-        self.add_sub_target(node, None)
+    pub fn add_target(&mut self, state: &State, node: NodeIndex) -> Result<bool, String> {
+        self.add_sub_target(state, node, None)
     }
 
-    pub fn add_sub_target(&mut self, node_idx: NodeIndex, dependent: Option<NodeIndex>) -> Result<bool, String> {
-        let node = self.state.node_state.get_node(node_idx);
+    pub fn add_sub_target(&mut self, state: &State, node_idx: NodeIndex, dependent: Option<NodeIndex>) -> Result<bool, String> {
+        let node = state.node_state.get_node(node_idx);
         let edge_idx = node.in_edge();
         if edge_idx.is_none() {
             if node.is_dirty() {
                 let mut err = format!("'{}'", String::from_utf8_lossy(node.path()));
                 if let Some(dependent) = dependent {
                     err += &format!(", needed by '{}',", 
-                        String::from_utf8_lossy(self.state.node_state.get_node(dependent).path()));
+                        String::from_utf8_lossy(state.node_state.get_node(dependent).path()));
                 }
                 err += " missing and no known rule to make it";
                 return Err(err);
@@ -83,7 +88,7 @@ impl<'a> Plan<'a> {
             return Ok(false);
         }
         let edge_idx = edge_idx.unwrap();
-        let edge = self.state.edge_state.get_edge(edge_idx);
+        let edge = state.edge_state.get_edge(edge_idx);
         if edge.outputs_ready() {
             return Ok(false); // Don't need to do anything.
         }
@@ -96,8 +101,8 @@ impl<'a> Plan<'a> {
         if node.is_dirty() && want.unwrap_or(false) == false {
             self.want.insert(edge_idx, true);
             self.wanted_edges += 1;
-            if edge.all_inputs_ready() {
-                self.schedule_work(edge_idx);
+            if edge.all_inputs_ready(state) {
+                self.schedule_work(state, edge_idx);
             }
             if !edge.is_phony() {
                 self.command_edges += 1;
@@ -106,11 +111,19 @@ impl<'a> Plan<'a> {
 
         if vacant {
             for input_node_idx in edge.inputs.iter() {
-                self.add_sub_target(*input_node_idx, Some(node_idx))?;
+                self.add_sub_target(state, *input_node_idx, Some(node_idx))?;
             }
         }
 
         return Ok(true);
+    }
+
+    /// Reset state.  Clears want and ready sets.
+    fn reset(&mut self) {
+        self.command_edges = 0;
+        self.wanted_edges = 0;
+        self.ready.clear();
+        self.want.clear();
     }
 
     /// Returns true if there's more work to be done.
@@ -121,8 +134,95 @@ impl<'a> Plan<'a> {
     /// Submits a ready edge as a candidate for execution.
     /// The edge may be delayed from running, for example if it's a member of a
     /// currently-full pool.
-    pub fn schedule_work(&mut self, edge_idx: EdgeIndex) {
-        unimplemented!();
+    pub fn schedule_work(&mut self, state: &State, edge_idx: EdgeIndex) {
+        if self.ready.get(&edge_idx).is_some() {
+            // This edge has already been scheduled.  We can get here again if an edge
+            // and one of its dependencies share an order-only input, or if a node
+            // duplicates an out edge (see https://github.com/ninja-build/ninja/pull/519).
+            // Avoid scheduling the work again.          
+            return;
+        }
+
+        let edge = state.edge_state.get_edge(edge_idx);
+        let mut pool = edge.pool.borrow_mut();
+        if pool.should_delay_edge() {
+            pool.delay_edge(edge_idx);
+            pool.retrieve_ready_edges(state, &mut self.ready);
+        } else {
+            pool.edge_scheduled(state, edge_idx);
+            self.ready.insert(edge_idx);
+        }
+    }
+
+    // Pop a ready edge off the queue of edges to build.
+    // Returns NULL if there's no work to do.
+    pub fn find_work(&mut self) -> Option<EdgeIndex> {
+        match self.ready.iter().next().cloned() {
+          Some(idx) => {
+            self.ready.remove(&idx);
+            Some(idx)
+          },
+          None => None,
+        }
+    }
+
+    /// Mark an edge as done building (whether it succeeded or failed).
+    pub fn edge_finished(&mut self, state: &State, edge_idx: EdgeIndex, result: EdgeResult) {
+        let directly_wanted = self.want.get(&edge_idx).unwrap().clone();
+        
+        {
+            let edge = state.edge_state.get_edge(edge_idx);
+
+            // See if this job frees up any delayed jobs.
+            if directly_wanted {
+                edge.pool.borrow_mut().edge_finished(state, edge_idx);
+            }
+
+            edge.pool.borrow_mut().retrieve_ready_edges(state, &mut self.ready);
+        }
+
+
+        match result {
+            EdgeResult::EdgeSucceeded => {
+                if directly_wanted {
+                    self.wanted_edges -= 1;
+                }
+                self.want.remove(&edge_idx);
+
+                let edge = state.edge_state.get_edge(edge_idx);
+                edge.outputs_ready.set(true);
+
+                // Check off any nodes we were waiting for with this edge.
+                for output_node_idx in edge.outputs.iter().cloned() {
+                    self.node_finished(state, output_node_idx);
+                }
+            },
+            _ => {}
+        };
+    }
+
+    pub fn node_finished(&mut self, state: &State, node_idx: NodeIndex) {
+        // See if we we want any edges from this node.
+        let node = state.node_state.get_node(node_idx);
+        for out_edge_idx in node.out_edges().iter().cloned() {
+            let want_e = self.want.get(&out_edge_idx).cloned();
+            if want_e.is_none() {
+                continue;
+            }
+
+            let oe = state.edge_state.get_edge(out_edge_idx);
+            if !oe.all_inputs_ready(state) {
+                continue;
+            }
+
+            if want_e.unwrap() {
+                self.schedule_work(state, out_edge_idx);
+            } else {
+                // We do not need to build this edge, but we might need to build one of
+                // its dependents.
+                self.edge_finished(state, out_edge_idx, EdgeResult::EdgeSucceeded);
+            }
+        }
     }
 }
 
@@ -130,11 +230,6 @@ impl<'a> Plan<'a> {
 
 struct Plan {
   Plan();
-
-  // Pop a ready edge off the queue of edges to build.
-  // Returns NULL if there's no work to do.
-  Edge* FindWork();
-
 
   /// Dumps the current state of the plan.
   void Dump();
@@ -144,8 +239,6 @@ struct Plan {
     kEdgeSucceeded
   };
 
-  /// Mark an edge as done building (whether it succeeded or failed).
-  void EdgeFinished(Edge* edge, EdgeResult result);
 
   /// Clean the given node during the build.
   /// Return false on error.
@@ -160,11 +253,6 @@ struct Plan {
 private:
   bool AddSubTarget(Node* node, Node* dependent, string* err);
   void NodeFinished(Node* node);
-
-  /// Submits a ready edge as a candidate for execution.
-  /// The edge may be delayed from running, for example if it's a member of a
-  /// currently-full pool.
-  void ScheduleWork(Edge* edge);
 
   set<Edge*> ready_;
 
@@ -274,7 +362,7 @@ struct BuildConfig {
 /// Builder wraps the build process: starting commands, updating status.
 pub struct Builder<'a> {
     state: &'a State,
-    plan: Plan<'a>,
+    plan: Plan,
 
     scan: DependencyScan,
 }
@@ -285,7 +373,7 @@ impl<'a> Builder<'a> {
           disk_interface: &DiskInterface) -> Self {
         Builder {
             state,
-            plan: Plan::new(state),
+            plan: Plan::new(),
             scan: DependencyScan::new(state, build_log, deps_log, disk_interface)
         }
     }
@@ -301,7 +389,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        self.plan.add_target(node_idx)?;
+        self.plan.add_target(self.state, node_idx)?;
 
         Ok(())
     }
@@ -758,55 +846,6 @@ void Plan::Reset() {
   want_.clear();
 }
 
-bool Plan::AddTarget(Node* node, string* err) {
-  return AddSubTarget(node, NULL, err);
-}
-
-bool Plan::AddSubTarget(Node* node, Node* dependent, string* err) {
-  Edge* edge = node->in_edge();
-  if (!edge) {  // Leaf node.
-    if (node->dirty()) {
-      string referenced;
-      if (dependent)
-        referenced = ", needed by '" + dependent->path() + "',";
-      *err = "'" + node->path() + "'" + referenced + " missing "
-             "and no known rule to make it";
-    }
-    return false;
-  }
-
-  if (edge->outputs_ready())
-    return false;  // Don't need to do anything.
-
-  // If an entry in want_ does not already exist for edge, create an entry which
-  // maps to false, indicating that we do not want to build this entry itself.
-  pair<map<Edge*, bool>::iterator, bool> want_ins =
-    want_.insert(make_pair(edge, false));
-  bool& want = want_ins.first->second;
-
-  // If we do need to build edge and we haven't already marked it as wanted,
-  // mark it now.
-  if (node->dirty() && !want) {
-    want = true;
-    ++wanted_edges_;
-    if (edge->AllInputsReady())
-      ScheduleWork(edge);
-    if (!edge->is_phony())
-      ++command_edges_;
-  }
-
-  if (!want_ins.second)
-    return true;  // We've already processed the inputs.
-
-  for (vector<Node*>::iterator i = edge->inputs_.begin();
-       i != edge->inputs_.end(); ++i) {
-    if (!AddSubTarget(*i, node, err) && !err->empty())
-      return false;
-  }
-
-  return true;
-}
-
 Edge* Plan::FindWork() {
   if (ready_.empty())
     return NULL;
@@ -814,26 +853,6 @@ Edge* Plan::FindWork() {
   Edge* edge = *e;
   ready_.erase(e);
   return edge;
-}
-
-void Plan::ScheduleWork(Edge* edge) {
-  set<Edge*>::iterator e = ready_.lower_bound(edge);
-  if (e != ready_.end() && !ready_.key_comp()(edge, *e)) {
-    // This edge has already been scheduled.  We can get here again if an edge
-    // and one of its dependencies share an order-only input, or if a node
-    // duplicates an out edge (see https://github.com/ninja-build/ninja/pull/519).
-    // Avoid scheduling the work again.
-    return;
-  }
-
-  Pool* pool = edge->pool();
-  if (pool->ShouldDelayEdge()) {
-    pool->DelayEdge(edge);
-    pool->RetrieveReadyEdges(&ready_);
-  } else {
-    pool->EdgeScheduled(*edge);
-    ready_.insert(e, edge);
-  }
 }
 
 void Plan::EdgeFinished(Edge* edge, EdgeResult result) {
@@ -1390,6 +1409,32 @@ bool Builder::ExtractDeps(CommandRunner::Result* result,
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use super::super::test::TestWithStateAndVFS;
+    use super::super::graph::Node;
+
+    /// Fixture for tests involving Plan.
+    // Though Plan doesn't use State, it's useful to have one around
+    // to create Nodes and Edges.
+    struct PlanTestData {
+        plan: Plan,
+    }
+
+    impl Default for PlanTestData {
+        fn default() -> Self {
+            PlanTestData {
+                plan: Plan::new(),
+            }
+        }
+    }
+
+    type PlanTest = TestWithStateAndVFS<PlanTestData>;
+
+    impl PlanTest {
+        pub fn new() -> Self {
+            Self::new_with_builtin_rule()
+        }
+    }
 
 /*
 
@@ -1421,7 +1466,47 @@ struct PlanTest : public StateTestWithBuiltinRules {
 
   void TestPoolWithDepthOne(const char *test_case);
 };
+*/
+    #[test]
+    fn plantest_basic() {
+        let mut plantest = PlanTest::new();
+        plantest.assert_parse(concat!(
+            "build out: cat mid\n",
+            "build mid: cat in\n").as_bytes());
+        plantest.assert_with_node_mut(b"mid", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"out", Node::mark_dirty);
+        let out_node_idx = plantest.assert_node_idx(b"out");
 
+        let mut state = plantest.state.borrow_mut();
+        let state = &mut *state;
+        let plan = &mut plantest.other.plan;
+        assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
+        assert_eq!(true, plan.more_to_do());
+
+        let edge_idx = plan.find_work().unwrap();
+        {
+            let edge = state.edge_state.get_edge(edge_idx);
+            let input0 = edge.inputs[0];
+            assert_eq!(b"in", state.node_state.get_node(input0).path());
+            let output0 = edge.outputs[0];
+            assert_eq!(b"mid", state.node_state.get_node(output0).path());
+        }
+        assert_eq!(None, plan.find_work());
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+        let edge_idx = plan.find_work().unwrap();
+        {
+            let edge = state.edge_state.get_edge(edge_idx);
+            let input0 = edge.inputs[0];
+            assert_eq!(b"mid", state.node_state.get_node(input0).path());
+            let output0 = edge.outputs[0];
+            assert_eq!(b"out", state.node_state.get_node(output0).path());
+        }
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        assert_eq!(false, plan.more_to_do());
+        assert_eq!(None, plan.find_work());
+    }
+/*
 TEST_F(PlanTest, Basic) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
 "build out: cat mid\n"

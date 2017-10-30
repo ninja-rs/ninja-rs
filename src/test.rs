@@ -18,16 +18,71 @@ use std::cell::RefCell;
 use std::io::{self};
 
 use super::disk_interface::{FileReader, FileReaderError, DiskInterface};
+use super::manifest_parser::{ManifestParserOptions, ManifestParser};
+use super::state::State;
+use super::graph::{Node, NodeIndex};
 
 // Support utilites for tests.
 
+pub struct TestWithStateAndVFS<OtherData: Default> {
+    pub state: RefCell<State>,
+    pub fs: VirtualFileSystem,
+    pub other: OtherData,
+}
+
+impl<OtherData: Default> TestWithStateAndVFS<OtherData> {
+    pub fn new_minimal() -> Self {
+        TestWithStateAndVFS {
+            state: RefCell::new(State::new()),
+            fs: VirtualFileSystem::new(),
+            other: Default::default(),
+        }
+    }
+
+    pub fn new_with_builtin_rule() -> Self {
+        let mut test = Self::new_minimal();
+        test.assert_parse(concat!("rule cat\n", "  command = cat $in > $out\n").as_bytes());
+        test
+    }
+
+    pub fn assert_parse_with_options(&mut self, input: &[u8], 
+        options: ManifestParserOptions) -> () {
+        let mut state = self.state.borrow_mut();
+        {
+            let mut parser = ManifestParser::new(&mut state, &self.fs, options);
+            assert_eq!(Ok(()), parser.parse_test(input));
+        }
+          
+        assert_eq!((), state.verify_graph());
+    }
+
+    pub fn assert_parse_with_options_error(&mut self, input: &[u8], 
+        options: ManifestParserOptions, err: &str) -> () {
+        let mut state = self.state.borrow_mut();
+        let mut parser = ManifestParser::new(&mut state, &self.fs, options);
+        assert_eq!(Err(err.to_owned()), parser.parse_test(input));
+    }
 
 
+    pub fn assert_parse(&mut self, input: &[u8]) -> () {
+        self.assert_parse_with_options(input, Default::default());
+    }
 
+    pub fn assert_parse_error(&mut self, input: &[u8], err: &str) -> () {
+        self.assert_parse_with_options_error(input, Default::default(), err);
+    }
 
+    pub fn assert_node_idx(&self, path: &[u8]) -> NodeIndex {
+        let state = self.state.borrow();
+        state.node_state.lookup_node(path).unwrap()
+    }
 
-
-
+    pub fn assert_with_node_mut<F: FnMut(&mut Node)>(&mut self, path: &[u8], mut f: F) {
+        let mut state = self.state.borrow_mut();
+        let node_idx = state.node_state.lookup_node(path).unwrap();
+        f(state.node_state.get_node_mut(node_idx));
+    }
+}
 
 /*
 

@@ -14,42 +14,14 @@
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet, BinaryHeap};
 use std::cmp::{PartialOrd, Ordering};
 
 use super::eval_env::{BindingEnv, Rule};
 use super::graph::{Edge, Node, EdgeIndex, NodeIndex, EdgeVisitMark};
 
-struct DelayedEdge<'a>(pub &'a Edge);
-
-impl<'a> PartialEq for DelayedEdge<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 as * const _ as usize == 
-            other.0 as * const _ as usize
-    }
-}
-
-impl<'a> PartialOrd for DelayedEdge<'a> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a> Eq for DelayedEdge<'a> {}
-impl<'a> Ord for DelayedEdge<'a> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // if (!a) return b;
-        // if (!b) return false;
-        let weight1 = self.0.weight();
-        let weight2 = other.0.weight();
-        if weight1 != weight2 {
-            weight1.cmp(&weight2)
-        } else {
-            (self.0 as * const _ as usize)
-                .cmp(&(other.0 as * const _ as usize))
-        }
-    }
-}
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DelayedEdge(pub usize, pub EdgeIndex);
 
 /// A pool for delayed edges.
 /// Pools are scoped to a State. Edges within a State will share Pools. A Pool
@@ -63,19 +35,19 @@ pub struct Pool {
     name: Vec<u8>,
     /// |current_use_| is the total of the weights of the edges which are
     /// currently scheduled in the Plan (i.e. the edges in Plan::ready_).
-    current_use: isize,
-    depth: isize,
+    current_use: usize,
+    depth: usize,
     
-    delayed: BTreeSet<DelayedEdge<'static>>,
+    delayed: BinaryHeap<DelayedEdge>,
 }
 
 impl Pool {
-    pub fn new(name: Vec<u8>, depth: isize) -> Self {
+    pub fn new(name: Vec<u8>, depth: usize) -> Self {
         Pool {
             name,
             current_use: 0,
             depth,
-            delayed: BTreeSet::new(),
+            delayed: BinaryHeap::new(),
         }
     }
 
@@ -84,7 +56,7 @@ impl Pool {
         self.depth >= 0
     }
 
-    pub fn depth(&self) -> isize {
+    pub fn depth(&self) -> usize {
         self.depth
     }
 
@@ -92,43 +64,65 @@ impl Pool {
         &self.name
     }
 
-    pub fn current_use(&self) -> isize {
+    pub fn current_use(&self) -> usize {
         self.current_use
     }
 
+    /// true if the Pool might delay this edge
+    pub fn should_delay_edge(&self) -> bool {
+        self.depth != 0
+    }
+
+    /// adds the given edge to this Pool to be delayed.
+    pub fn delay_edge(&mut self, edge: EdgeIndex) {
+        unimplemented!()
+    }
+
+    /// Pool will add zero or more edges to the ready_queue
+    pub fn retrieve_ready_edges(&mut self, state: &State, ready_queue: &mut BTreeSet<EdgeIndex>) {
+        while let Some(DelayedEdge(weight, edge_index)) = self.delayed.peek().cloned() {
+            if self.current_use + weight > self.depth {
+                break;
+            }
+            self.delayed.pop();
+            ready_queue.insert(edge_index);
+            self.edge_scheduled(state, edge_index);
+        };
+    }
+
+    /// informs this Pool that the given edge is committed to be run.
+    /// Pool will count this edge as using resources from this pool.
+    pub fn edge_scheduled(&mut self, state: &State, edge: EdgeIndex) {
+        if self.depth != 0 {
+            self.current_use += state.edge_state.get_edge(edge).weight();
+        }
+    }
+
+    /// informs this Pool that the given edge is no longer runnable, and should
+    /// relinquish its resources back to the pool
+    pub fn edge_finished(&mut self, state: &State, edge: EdgeIndex) {
+        if self.depth != 0 {
+            self.current_use -= state.edge_state.get_edge(edge).weight();
+        }
+    }
 }
 
 /*
 
 struct Pool {
 
-  /// true if the Pool might delay this edge
-  bool ShouldDelayEdge() const { return depth_ != 0; }
 
-  /// informs this Pool that the given edge is committed to be run.
-  /// Pool will count this edge as using resources from this pool.
-  void EdgeScheduled(const Edge& edge);
-
-  /// informs this Pool that the given edge is no longer runnable, and should
-  /// relinquish its resources back to the pool
-  void EdgeFinished(const Edge& edge);
 
   /// adds the given edge to this Pool to be delayed.
   void DelayEdge(Edge* edge);
 
-  /// Pool will add zero or more edges to the ready_queue
-  void RetrieveReadyEdges(set<Edge*>* ready_queue);
+
 
   /// Dump the Pool and its edges (useful for debugging).
   void Dump() const;
 
  private:
   string name_;
-
-  /// |current_use_| is the total of the weights of the edges which are
-  /// currently scheduled in the Plan (i.e. the edges in Plan::ready_).
-  int current_use_;
-  int depth_;
 
   static bool WeightedEdgeCmp(const Edge* a, const Edge* b);
 
@@ -384,7 +378,7 @@ impl State {
         }
 
         for edge in self.edge_state.edges.iter_mut() {
-            edge.outputs_ready = false;
+            edge.outputs_ready.set(false);
             edge.mark = EdgeVisitMark::VisitNone;
         }
     }

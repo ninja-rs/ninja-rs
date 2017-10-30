@@ -197,7 +197,7 @@ impl<'a> ManifestParser<'a> {
 
             let depth_string = value.evaluate(&self.env.borrow() as &BindingEnv);
             let depth_value = String::from_utf8_lossy(&depth_string).parse::<isize>().ok()
-                        .and_then(|v| if v >= 0 { Some(v) } else { None });
+                        .and_then(|v| if v >= 0 { Some(v as usize) } else { None });
             if depth_value.is_none() {
                 return Err(lexer.error("invalid pool depth"));
             }
@@ -539,44 +539,13 @@ mod parser_test {
     use super::super::utils::WINDOWS_PATH;
     use super::super::utils::RangeContains;
 
-    struct ParserTest {
-        pub state: RefCell<State>,
-        pub fs: VirtualFileSystem,
-    }
+    #[derive(Default)]
+    struct ParserTestData; // actually nothing.
 
+    type ParserTest = super::super::test::TestWithStateAndVFS<ParserTestData>;
     impl ParserTest {
-        pub fn new() -> Self {
-            ParserTest {
-                state: RefCell::new(State::new()),
-                fs: VirtualFileSystem::new(),
-            }
-        }
-
-        pub fn assert_parse_with_options(&mut self, input: &[u8], 
-            options: ManifestParserOptions) -> () {
-            let mut state = self.state.borrow_mut();
-            {
-                let mut parser = ManifestParser::new(&mut state, &self.fs, options);
-                assert_eq!(Ok(()), parser.parse_test(input));
-            }
-              
-            assert_eq!((), state.verify_graph());
-        }
-
-        pub fn assert_parse_with_options_error(&mut self, input: &[u8], 
-            options: ManifestParserOptions, err: &str) -> () {
-            let mut state = self.state.borrow_mut();
-            let mut parser = ManifestParser::new(&mut state, &self.fs, options);
-            assert_eq!(Err(err.to_owned()), parser.parse_test(input));
-        }
-
-
-        pub fn assert_parse(&mut self, input: &[u8]) -> () {
-            self.assert_parse_with_options(input, Default::default());
-        }
-
-        pub fn assert_parse_error(&mut self, input: &[u8], err: &str) -> () {
-            self.assert_parse_with_options_error(input, Default::default(), err);
+        fn new() -> Self {
+            Self::new_minimal()
         }
     }
 
