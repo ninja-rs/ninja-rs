@@ -28,10 +28,10 @@ use super::utils::WINDOWS_PATH;
 use super::utils::decanonicalize_path;
 use super::utils::ExtendFromEscapedSlice;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub struct NodeIndex(pub(crate) usize);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub struct EdgeIndex(pub(crate) usize);
 
 /// Information about a node in the dependency graph: the file, whether
@@ -149,6 +149,18 @@ impl Node {
     pub fn path_decanonicalized(&self) -> Vec<u8> {
         decanonicalize_path(&self.path, self.slash_bits)
     }
+
+    pub fn stat(&self, disk_interface: &DiskInterface) -> Result<(), String> {
+        unimplemented!()
+    }
+
+    pub fn stat_if_necessary(&self, disk_interface: &DiskInterface) -> Result<(), String> {
+        if self.status_known() {
+            return Ok(());
+        }
+
+        self.stat(disk_interface)
+    }
 }
 
 /*
@@ -165,9 +177,6 @@ struct Node {
     return Stat(disk_interface, err);
   }
 
-
-  static string PathDecanonicalized(const string& path,
-                                    uint64_t slash_bits);
 
   void Dump(const char* prefix="") const;
 
@@ -234,9 +243,22 @@ impl Edge {
         0..(self.inputs.len() - self.implicit_deps - self.order_only_deps)
     }
 
+    pub fn implicit_deps_range(&self) -> Range<usize> {
+        (self.inputs.len() - self.implicit_deps - self.order_only_deps)..
+        (self.inputs.len() - self.order_only_deps)
+    }
+
+    pub fn order_only_deps_range(&self) -> Range<usize> {
+        (self.inputs.len() - self.order_only_deps)..(self.inputs.len())
+    }
+
     pub fn explicit_outs_range(&self) -> Range<usize> {
         0..(self.outputs.len() - self.implicit_outs)
-    }    
+    }
+
+    pub fn implicit_outs_range(&self) -> Range<usize> {
+        (self.outputs.len() - self.implicit_outs)..(self.outputs.len())
+    }
 
     /// Returns the shell-escaped value of |key|.
     pub fn get_binding(&self, node_state: &NodeState, key: &[u8]) -> Cow<[u8]> {
@@ -297,6 +319,11 @@ impl Edge {
           self.implicit_outs == 0 && self.implicit_deps == 0
     }
 
+    /// Return true if all inputs' in-edges are ready.
+    pub fn all_inputs_ready(&self) -> bool {
+        unimplemented!();
+    }
+
     pub fn dump(&self) {
         unimplemented!();
     }
@@ -312,8 +339,7 @@ struct Edge {
            outputs_ready_(false), deps_missing_(false),
            implicit_deps_(0), order_only_deps_(0), implicit_outs_(0) {}
 
-  /// Return true if all inputs' in-edges are ready.
-  bool AllInputsReady() const;
+
 
 
   void Dump(const char* prefix="") const;
@@ -415,7 +441,13 @@ impl DependencyScan {
     /// state accordingly.
     /// Returns false on failure.
     pub fn recompute_dirty(&self, node: NodeIndex) -> Result<(), String> {
-        unimplemented!{}
+        let mut stack = Vec::new();
+        return self.recompute_dirty_inner(node, &mut stack);
+    }
+
+    fn recompute_dirty_inner(&self, node: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {
+        return Ok(());
+        unimplemented!()
     }
 
 

@@ -537,6 +537,7 @@ mod parser_test {
     use super::super::test::VirtualFileSystem;
     use super::super::graph::EdgeIndex;
     use super::super::utils::WINDOWS_PATH;
+    use super::super::utils::RangeContains;
 
     struct ParserTest {
         pub state: RefCell<State>,
@@ -900,49 +901,51 @@ mod parser_test {
         assert!(state.node_state.lookup_node(b"out/exe").is_some());
     }
 
-    
-/*
+    #[test]
+    fn parsertest_canonicalize_paths() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build ./out.o: cat ./bar/baz/../foo.cc\n").as_bytes());
 
-TEST_F(ParserTest, CanonicalizePaths) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build ./out.o: cat ./bar/baz/../foo.cc\n"));
+        let state = parsertest.state.borrow();
+        assert!(state.node_state.lookup_node(b"./out.o").is_none());
+        assert!(state.node_state.lookup_node(b"out.o").is_some());
+        assert!(state.node_state.lookup_node(b"./bar/baz/../foo.cc").is_none());
+        assert!(state.node_state.lookup_node(b"bar/foo.cc").is_some());        
+    }
 
-  EXPECT_FALSE(state.LookupNode("./out.o"));
-  EXPECT_TRUE(state.LookupNode("out.o"));
-  EXPECT_FALSE(state.LookupNode("./bar/baz/../foo.cc"));
-  EXPECT_TRUE(state.LookupNode("bar/foo.cc"));
-}
+    #[cfg(windows)]
+    #[test]
+    fn parsertest_canonicalize_paths_backslashes() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build ./out.o: cat ./bar/baz/../foo.cc\n",
+            "build .\\out2.o: cat .\\bar/baz\\..\\foo.cc\n",
+            "build .\\out3.o: cat .\\bar\\baz\\..\\foo3.cc\n").as_bytes());
+        let state = parsertest.state.borrow();
+        assert!(state.node_state.lookup_node(b"./out.o").is_none());
+        assert!(state.node_state.lookup_node(b".\\out2.o").is_none());
+        assert!(state.node_state.lookup_node(b".\\out3.o").is_none());
+        assert!(state.node_state.lookup_node(b"out.o").is_some());
+        assert!(state.node_state.lookup_node(b"out2.o").is_some());
+        assert!(state.node_state.lookup_node(b"out3.o").is_some());
+        assert!(state.node_state.lookup_node(b"./bar/baz/../foo.cc").is_none());
+        assert!(state.node_state.lookup_node(b".\\bar/baz\\..\\foo.cc").is_none());
+        assert!(state.node_state.lookup_node(b".\\bar/baz\\..\\foo3.cc").is_none());    
+        let mut node_idx;
+        node_idx = state.node_state.lookup_node(b"bar/foo.cc");
+        assert!(node_idx.is_some());
+        assert_eq!(0, state.node_state.get_node(node_idx.unwrap()).slash_bits());
 
-#ifdef _WIN32
-TEST_F(ParserTest, CanonicalizePathsBackslashes) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build ./out.o: cat ./bar/baz/../foo.cc\n"
-"build .\\out2.o: cat .\\bar/baz\\..\\foo.cc\n"
-"build .\\out3.o: cat .\\bar\\baz\\..\\foo3.cc\n"
-));
+        node_idx = state.node_state.lookup_node(b"bar/foo3.cc");
+        assert!(node_idx.is_some());
+        assert_eq!(1, state.node_state.get_node(node_idx.unwrap()).slash_bits());
+    }
 
-  EXPECT_FALSE(state.LookupNode("./out.o"));
-  EXPECT_FALSE(state.LookupNode(".\\out2.o"));
-  EXPECT_FALSE(state.LookupNode(".\\out3.o"));
-  EXPECT_TRUE(state.LookupNode("out.o"));
-  EXPECT_TRUE(state.LookupNode("out2.o"));
-  EXPECT_TRUE(state.LookupNode("out3.o"));
-  EXPECT_FALSE(state.LookupNode("./bar/baz/../foo.cc"));
-  EXPECT_FALSE(state.LookupNode(".\\bar/baz\\..\\foo.cc"));
-  EXPECT_FALSE(state.LookupNode(".\\bar/baz\\..\\foo3.cc"));
-  Node* node = state.LookupNode("bar/foo.cc");
-  EXPECT_TRUE(node);
-  EXPECT_EQ(0, node->slash_bits());
-  node = state.LookupNode("bar/foo3.cc");
-  EXPECT_TRUE(node);
-  EXPECT_EQ(1, node->slash_bits());
-}
-#endif
-*/
     #[test]
     fn parsertest_duplicate_edge_with_multiple_outputs() {
         let mut parsertest = ParserTest::new();
@@ -970,40 +973,40 @@ TEST_F(ParserTest, CanonicalizePathsBackslashes) {
       // That's all the checking that this test needs.       
     }
 
-/*
-TEST_F(ParserTest, DuplicateEdgeWithMultipleOutputsError) {
-  const char kInput[] =
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build out1 out2: cat in1\n"
-"build out1: cat in2\n"
-"build final: cat out1\n";
-  ManifestParserOptions parser_opts;
-  parser_opts.dupe_edge_action_ = kDupeEdgeActionError;
-  ManifestParser parser(&state, &fs_, parser_opts);
-  string err;
-  EXPECT_FALSE(parser.ParseTest(kInput, &err));
-  EXPECT_EQ("input:5: multiple rules generate out1 [-w dupbuild=err]\n", err);
-}
+    #[test]
+    fn parsertest_duplicated_edge_with_multiple_outputs_error() {
+        let mut parsertest = ParserTest::new();
+        let mut options = ManifestParserOptions::new();
+        options.dupe_edge_action = DupeEdgeAction::ERROR;
+        parsertest.assert_parse_with_options_error(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build out1 out2: cat in1\n",
+            "build out1: cat in2\n",
+            "build final: cat out1\n"
+            ).as_bytes(), options,
+            "input:5: multiple rules generate out1 [-w dupbuild=err]\n");
+    }
 
-TEST_F(ParserTest, DuplicateEdgeInIncludedFile) {
-  fs_.Create("sub.ninja",
-    "rule cat\n"
-    "  command = cat $in > $out\n"
-    "build out1 out2: cat in1\n"
-    "build out1: cat in2\n"
-    "build final: cat out1\n");
-  const char kInput[] =
-    "subninja sub.ninja\n";
-  ManifestParserOptions parser_opts;
-  parser_opts.dupe_edge_action_ = kDupeEdgeActionError;
-  ManifestParser parser(&state, &fs_, parser_opts);
-  string err;
-  EXPECT_FALSE(parser.ParseTest(kInput, &err));
-  EXPECT_EQ("sub.ninja:5: multiple rules generate out1 [-w dupbuild=err]\n",
-            err);
-}
-*/
+    #[test]
+    fn parsertest_duplicated_edge_in_included_file() {
+        let mut parsertest = ParserTest::new();
+        parsertest.fs.create(&PathBuf::from("sub.ninja"),
+            concat!(
+                "rule cat\n",
+                "  command = cat $in > $out\n",
+                "build out1 out2: cat in1\n",
+                "build out1: cat in2\n",
+                "build final: cat out1\n"
+            ).as_bytes());
+
+        let mut options = ManifestParserOptions::new();
+        options.dupe_edge_action = DupeEdgeAction::ERROR;
+        parsertest.assert_parse_with_options_error(concat!(
+            "subninja sub.ninja\n"
+            ).as_bytes(), options,
+            "sub.ninja:5: multiple rules generate out1 [-w dupbuild=err]\n");
+    }
 
     #[test]
     fn parsertest_phony_self_reference_ignored() {
@@ -1044,418 +1047,442 @@ TEST_F(ParserTest, DuplicateEdgeInIncludedFile) {
             "build subninja: build include default foo.cc\n",
             "default subninja\n").as_bytes());
     }
-/*
 
-TEST_F(ParserTest, Errors) {
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest(string("subn", 4), &err));
-    EXPECT_EQ("input:1: expected '=', got eof\n"
-              "subn\n"
-              "    ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_0() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "subn").as_bytes(),
+        concat!(
+            "input:1: expected '=', got eof\n",
+            "subn\n",
+            "    ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("foobar", &err));
-    EXPECT_EQ("input:1: expected '=', got eof\n"
-              "foobar\n"
-              "      ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_1() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "foobar").as_bytes(),
+        concat!(
+            "input:1: expected '=', got eof\n",
+            "foobar\n",
+            "      ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("x 3", &err));
-    EXPECT_EQ("input:1: expected '=', got identifier\n"
-              "x 3\n"
-              "  ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_2() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "x 3").as_bytes(),
+        concat!(
+            "input:1: expected '=', got identifier\n",
+            "x 3\n",
+            "  ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("x = 3", &err));
-    EXPECT_EQ("input:1: unexpected EOF\n"
-              "x = 3\n"
-              "     ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_3() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "x = 3").as_bytes(),
+        concat!(
+            "input:1: unexpected EOF\n",
+            "x = 3\n",
+            "     ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("x = 3\ny 2", &err));
-    EXPECT_EQ("input:2: expected '=', got identifier\n"
-              "y 2\n"
-              "  ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_4() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "x = 3\ny 2").as_bytes(),
+        concat!(
+            "input:2: expected '=', got identifier\n",
+            "y 2\n",
+            "  ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("x = $", &err));
-    EXPECT_EQ("input:1: bad $-escape (literal $ must be written as $$)\n"
-              "x = $\n"
-              "    ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_5() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "x = $").as_bytes(),
+        concat!(
+            "input:1: bad $-escape (literal $ must be written as $$)\n",
+            "x = $\n",
+            "    ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("x = $\n $[\n", &err));
-    EXPECT_EQ("input:2: bad $-escape (literal $ must be written as $$)\n"
-              " $[\n"
-              " ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_6() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "x = $\n $[\n").as_bytes(),
+        concat!(
+            "input:2: bad $-escape (literal $ must be written as $$)\n",
+            " $[\n",
+            " ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("x = a$\n b$\n $\n", &err));
-    EXPECT_EQ("input:4: unexpected EOF\n"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_7() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "x = a$\n b$\n $\n").as_bytes(),
+        concat!(
+            "input:4: unexpected EOF\n"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("build\n", &err));
-    EXPECT_EQ("input:1: expected path\n"
-              "build\n"
-              "     ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_8() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "build\n").as_bytes(),
+        concat!(
+            "input:1: expected path\n",
+            "build\n",
+            "     ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("build x: y z\n", &err));
-    EXPECT_EQ("input:1: unknown build rule 'y'\n"
-              "build x: y z\n"
-              "       ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_9() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "build x: y z\n").as_bytes(),
+        concat!(
+            "input:1: unknown build rule 'y'\n",
+            "build x: y z\n",
+            "       ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("build x:: y z\n", &err));
-    EXPECT_EQ("input:1: expected build command name\n"
-              "build x:: y z\n"
-              "       ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_10() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "build x:: y z\n").as_bytes(),
+        concat!(
+            "input:1: expected build command name\n",
+            "build x:: y z\n",
+            "       ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n  command = cat ok\n"
-                                  "build x: cat $\n :\n",
-                                  &err));
-    EXPECT_EQ("input:4: expected newline, got ':'\n"
-              " :\n"
-              " ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_11() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n  command = cat ok\n",
+            "build x: cat $\n :\n").as_bytes(),
+        concat!(
+            "input:4: expected newline, got ':'\n",
+            " :\n",
+            " ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n",
-                                  &err));
-    EXPECT_EQ("input:2: expected 'command =' line\n", err);
-  }
+    #[test]
+    fn parsertest_errors_12() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n").as_bytes(),
+        concat!(
+            "input:2: expected 'command =' line\n"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n"
-                                  "  command = echo\n"
-                                  "rule cat\n"
-                                  "  command = echo\n", &err));
-    EXPECT_EQ("input:3: duplicate rule 'cat'\n"
-              "rule cat\n"
-              "        ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_13() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n",
+            "  command = echo\n",
+            "rule cat\n",
+            "  command = echo\n").as_bytes(),
+        concat!(
+            "input:3: duplicate rule 'cat'\n",
+            "rule cat\n",
+            "        ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n"
-                                  "  command = echo\n"
-                                  "  rspfile = cat.rsp\n", &err));
-    EXPECT_EQ(
-        "input:4: rspfile and rspfile_content need to be both specified\n",
-        err);
-  }
+    #[test]
+    fn parsertest_errors_14() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n",
+            "  command = echo\n",
+            "  rspfile = cat.rsp\n").as_bytes(),
+        concat!(
+            "input:4: rspfile and rspfile_content need to be both specified\n"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n"
-                                  "  command = ${fafsd\n"
-                                  "foo = bar\n",
-                                  &err));
-    EXPECT_EQ("input:2: bad $-escape (literal $ must be written as $$)\n"
-              "  command = ${fafsd\n"
-              "            ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_15() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n",
+            "  command = ${fafsd\n",
+            "foo = bar\n").as_bytes(),
+        concat!(
+            "input:2: bad $-escape (literal $ must be written as $$)\n",
+            "  command = ${fafsd\n",
+            "            ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_16() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n",
+            "  command = cat\n",
+            "build $.: cat foo\n").as_bytes(),
+        concat!(
+            "input:3: bad $-escape (literal $ must be written as $$)\n",
+            "build $.: cat foo\n",
+            "      ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_17() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cat\n",
+            "  command = cat\n",
+            "build $: cat foo\n").as_bytes(),
+        concat!(
+            "input:3: expected ':', got newline ($ also escapes ':')\n",
+            "build $: cat foo\n",
+            "                ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_18() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule %foo\n").as_bytes(),
+        concat!(
+            "input:1: expected rule name\n"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_19() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cc\n",
+            "  command = foo\n",
+            "  othervar = bar\n").as_bytes(),
+        concat!(
+            "input:3: unexpected variable 'othervar'\n",
+            "  othervar = bar\n",
+            "                ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_20() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cc\n  command = foo\n",
+            "build $.: cc bar.cc\n").as_bytes(),
+        concat!(
+            "input:3: bad $-escape (literal $ must be written as $$)\n",
+            "build $.: cc bar.cc\n",
+            "      ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_21() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cc\n  command = foo\n  && bar").as_bytes(),
+        concat!(
+            "input:3: expected variable name\n"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_22() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cc\n  command = foo\n",
+            "build $: cc bar.cc\n").as_bytes(),
+        concat!(
+            "input:3: expected ':', got newline ($ also escapes ':')\n",
+            "build $: cc bar.cc\n",
+            "                  ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_23() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "default\n").as_bytes(),
+        concat!(
+            "input:1: expected target name\n",
+            "default\n",
+            "       ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_24() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "default nonexistent\n").as_bytes(),
+        concat!(
+            "input:1: unknown target 'nonexistent'\n",
+            "default nonexistent\n",
+            "                   ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_25() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule r\n  command = r\n",
+            "build b: r\n",
+            "default b:\n").as_bytes(),
+        concat!(
+            "input:4: expected newline, got ':'\n",
+            "default b:\n",
+            "         ^ near here"
+        ));
+    }
 
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n"
-                                  "  command = cat\n"
-                                  "build $.: cat foo\n",
-                                  &err));
-    EXPECT_EQ("input:3: bad $-escape (literal $ must be written as $$)\n"
-              "build $.: cat foo\n"
-              "      ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_26() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "default $a\n").as_bytes(),
+        concat!(
+            "input:1: empty path\n",
+            "default $a\n",
+            "          ^ near here"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_27() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule r\n",
+            "  command = r\n",
+            "build $a: r $c\n").as_bytes(),
+        concat!(
+            "input:4: empty path\n"
+        ));
+        // XXX the line number is wrong; we should evaluate paths in ParseEdge
+        // as we see them, not after we've read them all!
+    }
+
+    #[test]
+    fn parsertest_errors_28() {
+        let mut parsertest = ParserTest::new();
+        // the indented blank line must terminate the rule
+        // this also verifies that "unexpected (token)" errors are correct
+        parsertest.assert_parse_error(concat!(
+            "rule r\n",
+            "  command = r\n",
+            "  \n",
+            "  generator = 1\n").as_bytes(),
+        concat!(
+            "input:4: unexpected indent\n"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_29() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "pool\n").as_bytes(),
+        concat!(
+            "input:1: expected pool name\n"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_30() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "pool foo\n").as_bytes(),
+        concat!(
+            "input:2: expected 'depth =' line\n"
+        ));
+    }
+
+    #[test]
+    fn parsertest_errors_31() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "pool foo\n",
+            "  depth = 4\n",
+            "pool foo\n").as_bytes(),
+        concat!(
+            "input:3: duplicate pool 'foo'\n",
+            "pool foo\n",
+            "        ^ near here"
+        ));
+    }
 
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cat\n"
-                                  "  command = cat\n"
-                                  "build $: cat foo\n",
-                                  &err));
-    EXPECT_EQ("input:3: expected ':', got newline ($ also escapes ':')\n"
-              "build $: cat foo\n"
-              "                ^ near here"
-              , err);
-  }
+    #[test]
+    fn parsertest_errors_32() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "pool foo\n",
+            "  depth = -1\n").as_bytes(),
+        concat!(
+            "input:2: invalid pool depth\n",
+            "  depth = -1\n",
+            "            ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule %foo\n",
-                                  &err));
-    EXPECT_EQ("input:1: expected rule name\n", err);
-  }
+    #[test]
+    fn parsertest_errors_33() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "pool foo\n",
+            "  bar = 1\n").as_bytes(),
+        concat!(
+            "input:2: unexpected variable 'bar'\n",
+            "  bar = 1\n",
+            "         ^ near here"
+        ));
+    }
 
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cc\n"
-                                  "  command = foo\n"
-                                  "  othervar = bar\n",
-                                  &err));
-    EXPECT_EQ("input:3: unexpected variable 'othervar'\n"
-              "  othervar = bar\n"
-              "                ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cc\n  command = foo\n"
-                                  "build $.: cc bar.cc\n",
-                                  &err));
-    EXPECT_EQ("input:3: bad $-escape (literal $ must be written as $$)\n"
-              "build $.: cc bar.cc\n"
-              "      ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cc\n  command = foo\n  && bar",
-                                  &err));
-    EXPECT_EQ("input:3: expected variable name\n", err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule cc\n  command = foo\n"
-                                  "build $: cc bar.cc\n",
-                                  &err));
-    EXPECT_EQ("input:3: expected ':', got newline ($ also escapes ':')\n"
-              "build $: cc bar.cc\n"
-              "                  ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("default\n",
-                                  &err));
-    EXPECT_EQ("input:1: expected target name\n"
-              "default\n"
-              "       ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("default nonexistent\n",
-                                  &err));
-    EXPECT_EQ("input:1: unknown target 'nonexistent'\n"
-              "default nonexistent\n"
-              "                   ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule r\n  command = r\n"
-                                  "build b: r\n"
-                                  "default b:\n",
-                                  &err));
-    EXPECT_EQ("input:4: expected newline, got ':'\n"
-              "default b:\n"
-              "         ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("default $a\n", &err));
-    EXPECT_EQ("input:1: empty path\n"
-              "default $a\n"
-              "          ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("rule r\n"
-                                  "  command = r\n"
-                                  "build $a: r $c\n", &err));
-    // XXX the line number is wrong; we should evaluate paths in ParseEdge
-    // as we see them, not after we've read them all!
-    EXPECT_EQ("input:4: empty path\n", err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    // the indented blank line must terminate the rule
-    // this also verifies that "unexpected (token)" errors are correct
-    EXPECT_FALSE(parser.ParseTest("rule r\n"
-                                  "  command = r\n"
-                                  "  \n"
-                                  "  generator = 1\n", &err));
-    EXPECT_EQ("input:4: unexpected indent\n", err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("pool\n", &err));
-    EXPECT_EQ("input:1: expected pool name\n", err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("pool foo\n", &err));
-    EXPECT_EQ("input:2: expected 'depth =' line\n", err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("pool foo\n"
-                                  "  depth = 4\n"
-                                  "pool foo\n", &err));
-    EXPECT_EQ("input:3: duplicate pool 'foo'\n"
-              "pool foo\n"
-              "        ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("pool foo\n"
-                                  "  depth = -1\n", &err));
-    EXPECT_EQ("input:2: invalid pool depth\n"
-              "  depth = -1\n"
-              "            ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    EXPECT_FALSE(parser.ParseTest("pool foo\n"
-                                  "  bar = 1\n", &err));
-    EXPECT_EQ("input:2: unexpected variable 'bar'\n"
-              "  bar = 1\n"
-              "         ^ near here"
-              , err);
-  }
-
-  {
-    State local_state;
-    ManifestParser parser(&local_state, NULL);
-    string err;
-    // Pool names are dereferenced at edge parsing time.
-    EXPECT_FALSE(parser.ParseTest("rule run\n"
-                                  "  command = echo\n"
-                                  "  pool = unnamed_pool\n"
-                                  "build out: run in\n", &err));
-    EXPECT_EQ("input:5: unknown pool name 'unnamed_pool'\n", err);
-  }
-}
-*/
+    #[test]
+    fn parsertest_errors_34() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule run\n",
+            "  command = echo\n",
+            "  pool = unnamed_pool\n",
+            "build out: run in\n").as_bytes(),
+        concat!(
+            "input:5: unknown pool name 'unnamed_pool'\n"
+        ));
+    }
 
     #[test]
     fn parsertest_missing_input() {
@@ -1474,44 +1501,50 @@ TEST_F(ParserTest, Errors) {
             "rule cc\n  command = foo\n  depfile = bar\n",
             "build a.o b.o: cc c.cc\n").as_bytes());
     }
-/*
 
-TEST_F(ParserTest, MultipleOutputsWithDeps) {
-  State local_state;
-  ManifestParser parser(&local_state, NULL);
-  string err;
-  EXPECT_FALSE(parser.ParseTest("rule cc\n  command = foo\n  deps = gcc\n"
-                               "build a.o b.o: cc c.cc\n",
-                               &err));
-  EXPECT_EQ("input:5: multiple outputs aren't (yet?) supported by depslog; "
-            "bring this up on the mailing list if it affects you\n", err);
-}
+    #[test]
+    fn parsertest_multiple_outputs_with_deps() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse_error(concat!(
+            "rule cc\n  command = foo\n  deps = gcc\n",
+            "build a.o b.o: cc c.cc\n").as_bytes(),
+            concat!(
+                "input:5: multiple outputs aren't (yet?) supported by depslog; ",
+                "bring this up on the mailing list if it affects you\n"));
+    }
 
-TEST_F(ParserTest, SubNinja) {
-  fs_.Create("test.ninja",
-    "var = inner\n"
-    "build $builddir/inner: varref\n");
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"builddir = some_dir/\n"
-"rule varref\n"
-"  command = varref $var\n"
-"var = outer\n"
-"build $builddir/outer: varref\n"
-"subninja test.ninja\n"
-"build $builddir/outer2: varref\n"));
-  ASSERT_EQ(1u, fs_.files_read_.size());
+    #[test]
+    fn parsertest_sub_ninja() {
+        let mut parsertest = ParserTest::new();
+        parsertest.fs.create(&PathBuf::from("test.ninja"), concat!(
+            "var = inner\n",
+            "build $builddir/inner: varref\n").as_bytes());
 
-  EXPECT_EQ("test.ninja", fs_.files_read_[0]);
-  EXPECT_TRUE(state.LookupNode("some_dir/outer"));
-  // Verify our builddir setting is inherited.
-  EXPECT_TRUE(state.LookupNode("some_dir/inner"));
+        parsertest.assert_parse(concat!(
+            "builddir = some_dir/\n",
+            "rule varref\n",
+            "  command = varref $var\n",
+            "var = outer\n",
+            "build $builddir/outer: varref\n",
+            "subninja test.ninja\n",
+            "build $builddir/outer2: varref\n").as_bytes());
 
-  ASSERT_EQ(3u, state.edges_.size());
-  EXPECT_EQ("varref outer", state.edges_[0]->EvaluateCommand());
-  EXPECT_EQ("varref inner", state.edges_[1]->EvaluateCommand());
-  EXPECT_EQ("varref outer", state.edges_[2]->EvaluateCommand());
-}
-*/
+        assert_eq!(1usize, parsertest.fs.files_read.borrow().len());
+        assert_eq!(&PathBuf::from("test.ninja"), &parsertest.fs.files_read.borrow()[0]);
+
+        let state = parsertest.state.borrow();
+        assert!(state.node_state.lookup_node(b"some_dir/outer").is_some());
+        // Verify our builddir setting is inherited.
+        assert!(state.node_state.lookup_node(b"some_dir/inner").is_some());
+
+        assert_eq!(3, state.edge_state.len());
+        assert_eq!(b"varref outer".as_ref().to_owned(), 
+            state.edge_state.get_edge(EdgeIndex(0)).evaluate_command(&state.node_state));
+        assert_eq!(b"varref inner".as_ref().to_owned(), 
+            state.edge_state.get_edge(EdgeIndex(1)).evaluate_command(&state.node_state));
+        assert_eq!(b"varref outer".as_ref().to_owned(), 
+            state.edge_state.get_edge(EdgeIndex(2)).evaluate_command(&state.node_state));
+    }
 
     #[test]
     fn parsertest_missing_subninja() {
@@ -1522,32 +1555,39 @@ TEST_F(ParserTest, SubNinja) {
             "subninja foo.ninja\n",
             "                  ^ near here"));
     }
-/*
 
-TEST_F(ParserTest, DuplicateRuleInDifferentSubninjas) {
-  // Test that rules are scoped to subninjas.
-  fs_.Create("test.ninja", "rule cat\n"
-                         "  command = cat\n");
-  ManifestParser parser(&state, &fs_);
-  string err;
-  EXPECT_TRUE(parser.ParseTest("rule cat\n"
-                                "  command = cat\n"
-                                "subninja test.ninja\n", &err));
-}
+    #[test]
+    fn parsertest_duplicate_rule_in_different_subninjas() {
+        let mut parsertest = ParserTest::new();
+        // Test that rules are scoped to subninjas.
+        parsertest.fs.create(&PathBuf::from("test.ninja"),
+            concat!(
+                "rule cat\n",
+                "  command = cat\n").as_bytes());
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat\n",
+            "subninja test.ninja\n").as_bytes());
+    }
 
-TEST_F(ParserTest, DuplicateRuleInDifferentSubninjasWithInclude) {
-  // Test that rules are scoped to subninjas even with includes.
-  fs_.Create("rules.ninja", "rule cat\n"
-                         "  command = cat\n");
-  fs_.Create("test.ninja", "include rules.ninja\n"
-                         "build x : cat\n");
-  ManifestParser parser(&state, &fs_);
-  string err;
-  EXPECT_TRUE(parser.ParseTest("include rules.ninja\n"
-                                "subninja test.ninja\n"
-                                "build y : cat\n", &err));
-}
-*/
+    #[test]
+    fn parsertest_duplicate_rule_in_different_subninjas_with_include() {
+        let mut parsertest = ParserTest::new();
+        // Test that rules are scoped to subninjas even with includes.
+        parsertest.fs.create(&PathBuf::from("rules.ninja"),
+            concat!(
+                "rule cat\n",
+                "  command = cat\n").as_bytes());
+        parsertest.fs.create(&PathBuf::from("test.ninja"),
+            concat!(
+                "include rules.ninja\n",
+                "build x : cat\n").as_bytes());
+        parsertest.assert_parse(concat!(
+            "include rules.ninja\n",
+            "subninja test.ninja\n",
+            "build y : cat\n").as_bytes());
+    }
+
     #[test]
     fn parsertest_include() {
         let mut parsertest = ParserTest::new();
@@ -1576,125 +1616,149 @@ TEST_F(ParserTest, DuplicateRuleInDifferentSubninjasWithInclude) {
               "build\n",
               "     ^ near here"));
     }
-/*
 
-TEST_F(ParserTest, Implicit) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build foo: cat bar | baz\n"));
+    #[test]
+    fn parsertest_implicit() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build foo: cat bar | baz\n").as_bytes());
+        let state = parsertest.state.borrow();
+        let node_idx = state.node_state.lookup_node(b"foo").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        assert!(state.edge_state.get_edge(edge_idx).implicit_deps_range().contains_stable(1));
+    }
 
-  Edge* edge = state.LookupNode("foo")->in_edge();
-  ASSERT_TRUE(edge->is_implicit(1));
-}
+    #[test]
+    fn parsertest_order_only() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n  command = cat $in > $out\n",
+            "build foo: cat bar || baz\n").as_bytes());
+        let state = parsertest.state.borrow();
+        let node_idx = state.node_state.lookup_node(b"foo").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        assert!(state.edge_state.get_edge(edge_idx).order_only_deps_range().contains_stable(1));
+    }
 
-TEST_F(ParserTest, OrderOnly) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n  command = cat $in > $out\n"
-"build foo: cat bar || baz\n"));
+    #[test]
+    fn parsertest_implicit_output() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build foo | imp: cat bar\n").as_bytes());
+        let state = parsertest.state.borrow();
+        let node_idx = state.node_state.lookup_node(b"imp").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        let edge = state.edge_state.get_edge(edge_idx);
+        assert_eq!(2, edge.outputs.len());
+        assert!(edge.implicit_outs_range().contains_stable(1));
+    }
 
-  Edge* edge = state.LookupNode("foo")->in_edge();
-  ASSERT_TRUE(edge->is_order_only(1));
-}
+    #[test]
+    fn parsertest_implicit_output_empty() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build foo | : cat bar\n").as_bytes());
+        let state = parsertest.state.borrow();
+        let node_idx = state.node_state.lookup_node(b"foo").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        let edge = state.edge_state.get_edge(edge_idx);
+        assert_eq!(1, edge.outputs.len());
+        assert!(!edge.implicit_outs_range().contains_stable(0));
+    }
 
-TEST_F(ParserTest, ImplicitOutput) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build foo | imp: cat bar\n"));
+    #[test]
+    fn parsertest_implicit_output_dupe() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build foo baz | foo baq foo: cat bar\n").as_bytes());
 
-  Edge* edge = state.LookupNode("imp")->in_edge();
-  ASSERT_EQ(edge->outputs_.size(), 2);
-  EXPECT_TRUE(edge->is_implicit_out(1));
-}
+        let state = parsertest.state.borrow();
+        let node_idx = state.node_state.lookup_node(b"foo").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        let edge = state.edge_state.get_edge(edge_idx);
+        assert_eq!(3, edge.outputs.len());
+        assert!(!edge.implicit_outs_range().contains_stable(0));
+        assert!(!edge.implicit_outs_range().contains_stable(1));
+        assert!(edge.implicit_outs_range().contains_stable(2));        
+    }
 
-TEST_F(ParserTest, ImplicitOutputEmpty) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build foo | : cat bar\n"));
+    #[test]
+    fn parsertest_implicit_output_dupes() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build foo foo foo | foo foo foo foo: cat bar\n").as_bytes());
 
-  Edge* edge = state.LookupNode("foo")->in_edge();
-  ASSERT_EQ(edge->outputs_.size(), 1);
-  EXPECT_FALSE(edge->is_implicit_out(0));
-}
+        let state = parsertest.state.borrow();
+        let node_idx = state.node_state.lookup_node(b"foo").unwrap();
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+        let edge = state.edge_state.get_edge(edge_idx);
+        assert_eq!(1, edge.outputs.len());
+        assert!(!edge.implicit_outs_range().contains_stable(0));
+    }
 
-TEST_F(ParserTest, ImplicitOutputDupe) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build foo baz | foo baq foo: cat bar\n"));
+    #[test]
+    fn parsertest_no_explicit_output() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n",
+            "  command = cat $in > $out\n",
+            "build | imp : cat bar\n").as_bytes());
+    }
 
-  Edge* edge = state.LookupNode("foo")->in_edge();
-  ASSERT_EQ(edge->outputs_.size(), 3);
-  EXPECT_FALSE(edge->is_implicit_out(0));
-  EXPECT_FALSE(edge->is_implicit_out(1));
-  EXPECT_TRUE(edge->is_implicit_out(2));
-}
+    #[test]
+    fn parsertest_default_default() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n  command = cat $in > $out\n",
+            "build a: cat foo\n",
+            "build b: cat foo\n",
+            "build c: cat foo\n",
+            "build d: cat foo\n").as_bytes());
 
-TEST_F(ParserTest, ImplicitOutputDupes) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build foo foo foo | foo foo foo foo: cat bar\n"));
+        assert_eq!(4, parsertest.state.borrow().default_nodes().unwrap().len());
+    }
 
-  Edge* edge = state.LookupNode("foo")->in_edge();
-  ASSERT_EQ(edge->outputs_.size(), 1);
-  EXPECT_FALSE(edge->is_implicit_out(0));
-}
+    #[test]
+    fn parsertest_default_default_cycle() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n  command = cat $in > $out\n",
+            "build a: cat a\n").as_bytes());
 
-TEST_F(ParserTest, NoExplicitOutput) {
-  ManifestParser parser(&state, NULL);
-  string err;
-  EXPECT_TRUE(parser.ParseTest(
-"rule cat\n"
-"  command = cat $in > $out\n"
-"build | imp : cat bar\n", &err));
-}
+        assert_eq!(Err("could not determine root nodes of build graph".to_owned()), 
+            parsertest.state.borrow().default_nodes());
+    }
 
-TEST_F(ParserTest, DefaultDefault) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n  command = cat $in > $out\n"
-"build a: cat foo\n"
-"build b: cat foo\n"
-"build c: cat foo\n"
-"build d: cat foo\n"));
+    #[test]
+    fn parsertest_default_statements() {
+        let mut parsertest = ParserTest::new();
+        parsertest.assert_parse(concat!(
+            "rule cat\n  command = cat $in > $out\n",
+            "build a: cat foo\n",
+            "build b: cat foo\n",
+            "build c: cat foo\n",
+            "build d: cat foo\n",
+            "third = c\n",
+            "default a b\n",
+            "default $third\n").as_bytes());
 
-  string err;
-  EXPECT_EQ(4u, state.DefaultNodes(&err).size());
-  EXPECT_EQ("", err);
-}
-
-TEST_F(ParserTest, DefaultDefaultCycle) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n  command = cat $in > $out\n"
-"build a: cat a\n"));
-
-  string err;
-  EXPECT_EQ(0u, state.DefaultNodes(&err).size());
-  EXPECT_EQ("could not determine root nodes of build graph", err);
-}
-
-TEST_F(ParserTest, DefaultStatements) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(
-"rule cat\n  command = cat $in > $out\n"
-"build a: cat foo\n"
-"build b: cat foo\n"
-"build c: cat foo\n"
-"build d: cat foo\n"
-"third = c\n"
-"default a b\n"
-"default $third\n"));
-
-  string err;
-  vector<Node*> nodes = state.DefaultNodes(&err);
-  EXPECT_EQ("", err);
-  ASSERT_EQ(3u, nodes.size());
-  EXPECT_EQ("a", nodes[0]->path());
-  EXPECT_EQ("b", nodes[1]->path());
-  EXPECT_EQ("c", nodes[2]->path());
-}
-*/
+        let state = parsertest.state.borrow();
+        let default_nodes = state.default_nodes().unwrap();
+        assert_eq!(3, default_nodes.len());
+        assert_eq!(b"a",state.node_state.get_node(default_nodes[0]).path());
+        assert_eq!(b"b",state.node_state.get_node(default_nodes[1]).path());
+        assert_eq!(b"c",state.node_state.get_node(default_nodes[2]).path());
+    }
 
     #[test]
     fn parsertest_utf8() {

@@ -191,9 +191,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
             IResult::Done(i, _) => {
                 rest_input = i;
             },
-            _ => {
-                panic!("unreachable");
-            }
+            _ => {},
         }
 
         self.last_token_offset = self.input.offset(rest_input);
@@ -312,9 +310,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
             IResult::Done(i, _) => {
                 rest_input = i;
             },
-            _ => {
-                panic!("unreachable");
-            }
+            _ => {}
         }
 
         self.offset = self.input.offset(rest_input);

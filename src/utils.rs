@@ -25,14 +25,15 @@ use std::path::PathBuf;
 /// of a function to get timing stats recorded for each call of the function.
 macro_rules! metric_record {
   ($metric: expr) => {
-      metric_record!($metric, METRIC_VAR);
+      metric_record!($metric, METRIC_VAR, metric_borrow);
   };
-  ($metric: expr, $metric_var: ident) => { 
+  ($metric: expr, $metric_var: ident, $metric_borrow: ident) => { 
       lazy_static! {
-          static ref $metric_var : Option<$crate::metrics::Metric> = 
-              $crate::debug_flags::METRICS.as_ref().map(|m| m.new_metric($metric));
+          static ref $metric_var : Option<::std::sync::Arc<::std::sync::Mutex<$crate::metrics::Metric>>> = 
+              $crate::debug_flags::METRICS.as_ref().map(|m| m.lock().unwrap().new_metric($metric));
       }
-      let _ = $crate::metrics::ScopedMetric::new(&$metric_var);
+      let mut $metric_borrow = $metric_var.as_ref().map(|r| r.lock().unwrap());
+      let _ = $crate::metrics::ScopedMetric::new($metric_borrow.as_mut().map(|r| &mut **r));
   };
 }
 
@@ -145,6 +146,15 @@ pub fn pathbuf_from_bytes(mut bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
     return pathbuf_from_bytes_os(bytes);
 }
 
+pub trait RangeContains<T> {
+    fn contains_stable(&self, item: T) -> bool;
+}
+
+impl<Idx: PartialOrd<Idx>> RangeContains<Idx> for std::ops::Range<Idx> {
+    fn contains_stable(&self, item: Idx) -> bool {
+        (self.start <= item) && (item < self.end)
+    }
+}
 /*
 
 /// Canonicalize a path like "foo/../bar.h" into just "bar.h".
@@ -229,7 +239,7 @@ NORETURN void Win32Fatal(const char* function);
 
 #include <assert.h>
 #include <errno.h>
-#include <fcntl.h>
+#include <fcntl.h>c
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
