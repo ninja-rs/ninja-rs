@@ -37,7 +37,7 @@ macro_rules! metric_record {
   };
 }
 
-
+#[macro_export]
 macro_rules! explain {
     ($fmt:expr) => 
         (if $crate::debug_flags::EXPLAINING {
@@ -50,6 +50,7 @@ macro_rules! explain {
 }
 
 /// Log a fatal message and exit.
+#[macro_export]
 macro_rules! fatal {
     ($fmt:expr) => 
         ({
@@ -64,6 +65,7 @@ macro_rules! fatal {
 }
 
 /// Log a warning message.
+#[macro_export]
 macro_rules! warning {
     ($fmt:expr) => 
         (eprint!(concat!("ninja warning: ", $fmt, "\n")));
@@ -72,6 +74,7 @@ macro_rules! warning {
 }
 
 /// Log an error message.
+#[macro_export]
 macro_rules! error {
     ($fmt:expr) => 
         (eprint!(concat!("ninja error: ", $fmt, "\n")));

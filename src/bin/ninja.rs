@@ -12,41 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std;
+//#[macro_use]
+extern crate clap;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate ninja;
 
 use std::path::{Path, PathBuf};
 
 use clap::{App, AppSettings, SubCommand, Arg, ArgMatches};
 
-use super::debug_flags::*;
-use super::build::{BuildConfig, BuildConfigVerbosity, Builder};
-use super::build_log::{BuildLog, BuildLogUser};
-use super::deps_log::DepsLog;
-use super::utils::*;
-use super::state::State;
-use super::graph::NodeIndex;
-use super::disk_interface::{DiskInterface, RealDiskInterface};
-use super::eval_env::Env;
-use super::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction, PhonyCycleAction};
-use super::version::NINJA_VERSION;
+use ninja::debug_flags::*;
+use ninja::build::{BuildConfig, BuildConfigVerbosity, Builder};
+use ninja::build_log::{BuildLog, BuildLogUser};
+use ninja::deps_log::DepsLog;
+use ninja::utils::*;
+use ninja::state::State;
+use ninja::graph::NodeIndex;
+use ninja::disk_interface::{DiskInterface, RealDiskInterface};
+use ninja::eval_env::Env;
+use ninja::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction, PhonyCycleAction};
+use ninja::version::NINJA_VERSION;
 
 /// Command-line options.
 #[derive(Default)]
 struct Options<'a> {
-  /// Build file to load.
-  input_file: PathBuf,
+    /// Build file to load.
+    input_file: PathBuf,
 
-  /// Directory to change into before running.
-  working_dir: Option<PathBuf>,
+    /// Directory to change into before running.
+    working_dir: Option<PathBuf>,
 
-  /// Tool to run rather than building.
-  tool: Option<Tool<'a>>,
+    /// Tool to run rather than building.
+    tool: Option<Tool<'a>>,
 
-  /// Whether duplicate rules for one target should warn or print an error.
-  dupe_edges_should_err: bool,
+    /// Whether duplicate rules for one target should warn or print an error.
+    dupe_edges_should_err: bool,
 
-  /// Whether phony cycles should warn or print an error.
-  phony_cycle_should_err: bool,
+    /// Whether phony cycles should warn or print an error.
+    phony_cycle_should_err: bool,
 }
 
 impl<'a> Options<'a> {
@@ -70,17 +75,17 @@ enum ToolRunAfter {
 
 /// Subtools, accessible via "-t foo".
 struct Tool<'a> {
-  /// Short name of the tool.
-  name: &'a str,
+    /// Short name of the tool.
+    name: &'a str,
 
-  /// Description (shown in "-t list").
-  desc: &'a str,
+    /// Description (shown in "-t list").
+    desc: &'a str,
 
-  /// When to run the tool.
-  when: ToolRunAfter,
+    /// When to run the tool.
+    when: ToolRunAfter,
 
-  /// Implementation of the tool.
-  func: NinjaMainToolFunc,
+    /// Implementation of the tool.
+    func: NinjaMainToolFunc,
 }
 
 type NinjaMainToolFunc = fn (&NinjaMain, &Options) -> Result<(), isize>;
@@ -570,7 +575,7 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
         let parallelism = parallelism.parse::<isize>()
             .map_err(|_| 1isize)
             .and_then(|p| if p > 0 {Ok(p)} else {Err(1isize)})
-            .unwrap_or_else(|e| {
+            .unwrap_or_else(|_| {
                 fatal!("invalid -j parameter");
             });
         config.parallelism = parallelism as _;
@@ -582,7 +587,7 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
         // to infinite for most sane builds.        
         let failures_allowed = failures_allowed.parse::<isize>()
             .map(|v| if v > 0 { v } else { std::isize::MAX })
-            .unwrap_or_else(|e| {
+            .unwrap_or_else(|_| {
                 fatal!("-k parameter not numeric; did you mean -k 0?");
             });
         config.failures_allowed = failures_allowed;
@@ -657,7 +662,7 @@ pub fn ninja_entry() -> Result<(), isize> {
         return tool_func(&ninja, &options);
     }
     const CYCLE_LIMIT: isize = 100;
-    for cycle in 1..(CYCLE_LIMIT + 1) {
+    for _cycle in 1..(CYCLE_LIMIT + 1) {
         let mut ninja = NinjaMain::new(&ninja_command, &config);
 
         let mut parser_opts = ManifestParserOptions::new();
@@ -1396,3 +1401,8 @@ extern "C" int exported_main(int argc, char** argv) {
 }
 
 */
+
+fn main() {
+    let errcode = ninja_entry().err().unwrap_or(0);
+    std::process::exit(errcode as _);
+}
