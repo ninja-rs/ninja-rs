@@ -1507,37 +1507,6 @@ struct PlanTest : public StateTestWithBuiltinRules {
         assert_eq!(None, plan.find_work());
     }
 /*
-TEST_F(PlanTest, Basic) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
-"build out: cat mid\n"
-"build mid: cat in\n"));
-  GetNode("mid")->MarkDirty();
-  GetNode("out")->MarkDirty();
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
-
-  Edge* edge = plan_.FindWork();
-  ASSERT_TRUE(edge);
-  ASSERT_EQ("in",  edge->inputs_[0]->path());
-  ASSERT_EQ("mid", edge->outputs_[0]->path());
-
-  ASSERT_FALSE(plan_.FindWork());
-
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);
-  ASSERT_EQ("mid", edge->inputs_[0]->path());
-  ASSERT_EQ("out", edge->outputs_[0]->path());
-
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  ASSERT_FALSE(plan_.more_to_do());
-  edge = plan_.FindWork();
-  ASSERT_EQ(0, edge);
-}
 
 // Test that two outputs from one rule can be handled as inputs to the next.
 TEST_F(PlanTest, DoubleOutputDirect) {

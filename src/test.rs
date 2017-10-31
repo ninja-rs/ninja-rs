@@ -21,6 +21,7 @@ use super::disk_interface::{FileReader, FileReaderError, DiskInterface};
 use super::manifest_parser::{ManifestParserOptions, ManifestParser};
 use super::state::State;
 use super::graph::{Node, NodeIndex};
+use super::timestamp::TimeStamp;
 
 // Support utilites for tests.
 
@@ -177,6 +178,9 @@ impl DiskInterface for VirtualFileSystem {
     }
     fn make_dirs(&self, path: &Path) -> Result<(), io::Error> {
         unimplemented!{}
+    }
+    fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
+        unimplemented!()
     }
 }
 

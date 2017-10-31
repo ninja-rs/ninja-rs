@@ -25,7 +25,7 @@ use super::state::{PHONY_RULE, CONSOLE_POOL};
 use super::eval_env::{Env, Rule, BindingEnv};
 use super::timestamp::TimeStamp;
 use super::utils::WINDOWS_PATH;
-use super::utils::decanonicalize_path;
+use super::utils::{decanonicalize_path, pathbuf_from_bytes};
 use super::utils::ExtendFromEscapedSlice;
 
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug)]
@@ -150,11 +150,20 @@ impl Node {
         decanonicalize_path(&self.path, self.slash_bits)
     }
 
-    pub fn stat(&self, disk_interface: &DiskInterface) -> Result<(), String> {
-        unimplemented!()
+    /// Return false on error.
+    pub fn stat(&mut self, disk_interface: &DiskInterface) -> Result<(), String> {
+        self.mtime = TimeStamp(-1);
+
+        let pathbuf = pathbuf_from_bytes(self.path.clone()).map_err(|e| {
+            format!("invalid utf-8 pathname: {}", String::from_utf8_lossy(&e))
+        })?;
+
+        self.mtime = disk_interface.stat(&pathbuf)?;
+        Ok(())
     }
 
-    pub fn stat_if_necessary(&self, disk_interface: &DiskInterface) -> Result<(), String> {
+    /// Return false on error.
+    pub fn stat_if_necessary(&mut self, disk_interface: &DiskInterface) -> Result<(), String> {
         if self.status_known() {
             return Ok(());
         }
@@ -166,17 +175,6 @@ impl Node {
 /*
 
 struct Node {
-
-  /// Return false on error.
-  bool Stat(DiskInterface* disk_interface, string* err);
-
-  /// Return false on error.
-  bool StatIfNecessary(DiskInterface* disk_interface, string* err) {
-    if (status_known())
-      return true;
-    return Stat(disk_interface, err);
-  }
-
 
   void Dump(const char* prefix="") const;
 
@@ -239,6 +237,14 @@ impl Edge {
         self.outputs_ready.get()
     }
     
+    // There are three types of inputs.
+    // 1) explicit deps, which show up as $in on the command line;
+    // 2) implicit deps, which the target depends on implicitly (e.g. C headers),
+    //                   and changes in them cause the target to rebuild;
+    // 3) order-only deps, which are needed before the target builds but which
+    //                     don't cause the target to rebuild.
+    // These are stored in inputs_ in that order, and we keep counts of
+    // #2 and #3 when we need to access the various subsets.
     pub fn explicit_deps_range(&self) -> Range<usize> {
         0..(self.inputs.len() - self.implicit_deps - self.order_only_deps)
     }
@@ -252,6 +258,11 @@ impl Edge {
         (self.inputs.len() - self.order_only_deps)..(self.inputs.len())
     }
 
+    // There are two types of outputs.
+    // 1) explicit outs, which show up as $out on the command line;
+    // 2) implicit outs, which the target generates but are not part of $out.
+    // These are stored in outputs_ in that order, and we keep a count of
+    // #2 to use when we need to access the various subsets.
     pub fn explicit_outs_range(&self) -> Range<usize> {
         0..(self.outputs.len() - self.implicit_outs)
     }
@@ -342,50 +353,7 @@ impl Edge {
 
 struct Edge {
 
-
-  Edge() : rule_(NULL), pool_(NULL), env_(NULL), mark_(VisitNone),
-           outputs_ready_(false), deps_missing_(false),
-           implicit_deps_(0), order_only_deps_(0), implicit_outs_(0) {}
-
-
-
-
   void Dump(const char* prefix="") const;
-
-
-
-  bool outputs_ready_;
-  bool deps_missing_;
-
-
-  // There are three types of inputs.
-  // 1) explicit deps, which show up as $in on the command line;
-  // 2) implicit deps, which the target depends on implicitly (e.g. C headers),
-  //                   and changes in them cause the target to rebuild;
-  // 3) order-only deps, which are needed before the target builds but which
-  //                     don't cause the target to rebuild.
-  // These are stored in inputs_ in that order, and we keep counts of
-  // #2 and #3 when we need to access the various subsets.
-  int implicit_deps_;
-  int order_only_deps_;
-  bool is_implicit(size_t index) {
-    return index >= inputs_.size() - order_only_deps_ - implicit_deps_ &&
-        !is_order_only(index);
-  }
-  bool is_order_only(size_t index) {
-    return index >= inputs_.size() - order_only_deps_;
-  }
-
-  // There are two types of outputs.
-  // 1) explicit outs, which show up as $out on the command line;
-  // 2) implicit outs, which the target generates but are not part of $out.
-  // These are stored in outputs_ in that order, and we keep a count of
-  // #2 to use when we need to access the various subsets.
-  int implicit_outs_;
-  bool is_implicit_out(size_t index) const {
-    return index >= outputs_.size() - implicit_outs_;
-  }
-
 };
 
 
@@ -514,43 +482,6 @@ struct DependencyScan {
 
 
 /*
-// Copyright 2011 Google Inc. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#include "graph.h"
-
-#include <assert.h>
-#include <stdio.h>
-
-#include "build_log.h"
-#include "debug_flags.h"
-#include "depfile_parser.h"
-#include "deps_log.h"
-#include "disk_interface.h"
-#include "manifest_parser.h"
-#include "metrics.h"
-#include "state.h"
-#include "util.h"
-
-bool Node::Stat(DiskInterface* disk_interface, string* err) {
-  return (mtime_ = disk_interface->Stat(path_, err)) != -1;
-}
-
-bool DependencyScan::RecomputeDirty(Node* node, string* err) {
-  vector<Node*> stack;
-  return RecomputeDirty(node, &stack, err);
-}
 
 bool DependencyScan::RecomputeDirty(Node* node, vector<Node*>* stack,
                                     string* err) {
@@ -788,14 +719,6 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
   return false;
 }
 
-bool Edge::AllInputsReady() const {
-  for (vector<Node*>::const_iterator i = inputs_.begin();
-       i != inputs_.end(); ++i) {
-    if ((*i)->in_edge() && !(*i)->in_edge()->outputs_ready())
-      return false;
-  }
-  return true;
-}
 */
 
 #[derive(Clone, Copy)]

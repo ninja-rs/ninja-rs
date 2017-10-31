@@ -16,6 +16,8 @@ use std::path::Path;
 use std::fs::{self};
 use std::io::{self, Read, ErrorKind};
 
+use super::timestamp::TimeStamp;
+
 /// Result of ReadFile.
 pub enum FileReaderError {
     NotFound(String),
@@ -41,14 +43,15 @@ pub trait DiskInterface: FileReader {
     /// Create all the parent directories for path; like mkdir -p
     /// `basename path`.
     fn make_dirs(&self, path: &Path) -> Result<(), io::Error>;
+
+    /// stat() a file, returning the mtime, or 0 if missing and -1 on
+    /// other errors.
+    fn stat(&self, path: &Path) -> Result<TimeStamp, String>;
 }
 
 /*
 
 struct DiskInterface: public FileReader {
-  /// stat() a file, returning the mtime, or 0 if missing and -1 on
-  /// other errors.
-  virtual TimeStamp Stat(const string& path, string* err) const = 0;
 
 
 
@@ -138,6 +141,10 @@ impl DiskInterface for RealDiskInterface {
             .recursive(true)
             .create(path)?;
         Ok(())
+    }
+
+    fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
+        unimplemented!()
     }
 }
 
