@@ -146,7 +146,7 @@ impl Plan {
         let edge = state.edge_state.get_edge(edge_idx);
         let mut pool = edge.pool.borrow_mut();
         if pool.should_delay_edge() {
-            pool.delay_edge(edge_idx);
+            pool.delay_edge(state, edge_idx);
             pool.retrieve_ready_edges(state, &mut self.ready);
         } else {
             pool.edge_scheduled(state, edge_idx);
@@ -360,28 +360,28 @@ struct BuildConfig {
 */
 
 /// Builder wraps the build process: starting commands, updating status.
-pub struct Builder<'a> {
-    state: &'a State,
+pub struct Builder<'s, 'a, 'b, 'c> where 's : 'a {
+    state: &'s mut State,
     plan: Plan,
 
-    scan: DependencyScan,
+    scan: DependencyScan<'s, 'a, 'b, 'c>,
 }
 
-impl<'a> Builder<'a> {
-    pub fn new(state: &'a State, config: &BuildConfig, 
-          build_log: &BuildLog, deps_log: &DepsLog,
-          disk_interface: &DiskInterface) -> Self {
+impl<'s, 'a, 'b, 'c> Builder<'s, 'a, 'b, 'c> where 's : 'a {
+    pub fn new(state: &'s mut State, config: &BuildConfig, 
+          build_log: &'a BuildLog<'s>, deps_log: &'b DepsLog,
+          disk_interface: &'c DiskInterface) -> Self {
         Builder {
             state,
             plan: Plan::new(),
-            scan: DependencyScan::new(state, build_log, deps_log, disk_interface)
+            scan: DependencyScan::new(build_log, deps_log, disk_interface)
         }
     }
 
     /// Add a target to the build, scanning dependencies.
     /// @return false on error.
     pub fn add_target(&mut self, node_idx: NodeIndex) -> Result<(), String> {
-        self.scan.recompute_dirty(node_idx)?;
+        self.scan.recompute_dirty(self.state, node_idx)?;
 
         if let Some(in_edge) = self.state.node_state.get_node(node_idx).in_edge() {
             if self.state.edge_state.get_edge(in_edge).outputs_ready() {
@@ -838,69 +838,6 @@ void BuildStatus::PrintStatus(Edge* edge, EdgeStatus status) {
 }
 
 Plan::Plan() : command_edges_(0), wanted_edges_(0) {}
-
-void Plan::Reset() {
-  command_edges_ = 0;
-  wanted_edges_ = 0;
-  ready_.clear();
-  want_.clear();
-}
-
-Edge* Plan::FindWork() {
-  if (ready_.empty())
-    return NULL;
-  set<Edge*>::iterator e = ready_.begin();
-  Edge* edge = *e;
-  ready_.erase(e);
-  return edge;
-}
-
-void Plan::EdgeFinished(Edge* edge, EdgeResult result) {
-  map<Edge*, bool>::iterator e = want_.find(edge);
-  assert(e != want_.end());
-  bool directly_wanted = e->second;
-
-  // See if this job frees up any delayed jobs.
-  if (directly_wanted)
-    edge->pool()->EdgeFinished(*edge);
-  edge->pool()->RetrieveReadyEdges(&ready_);
-
-  // The rest of this function only applies to successful commands.
-  if (result != kEdgeSucceeded)
-    return;
-
-  if (directly_wanted)
-    --wanted_edges_;
-  want_.erase(e);
-  edge->outputs_ready_ = true;
-
-  // Check off any nodes we were waiting for with this edge.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
-       o != edge->outputs_.end(); ++o) {
-    NodeFinished(*o);
-  }
-}
-
-void Plan::NodeFinished(Node* node) {
-  // See if we we want any edges from this node.
-  for (vector<Edge*>::const_iterator oe = node->out_edges().begin();
-       oe != node->out_edges().end(); ++oe) {
-    map<Edge*, bool>::iterator want_e = want_.find(*oe);
-    if (want_e == want_.end())
-      continue;
-
-    // See if the edge is now ready.
-    if ((*oe)->AllInputsReady()) {
-      if (want_e->second) {
-        ScheduleWork(*oe);
-      } else {
-        // We do not need to build this edge, but we might need to build one of
-        // its dependents.
-        EdgeFinished(*oe, kEdgeSucceeded);
-      }
-    }
-  }
-}
 
 bool Plan::CleanNode(DependencyScan* scan, Node* node, string* err) {
   node->set_dirty(false);
@@ -1506,244 +1443,292 @@ struct PlanTest : public StateTestWithBuiltinRules {
         assert_eq!(false, plan.more_to_do());
         assert_eq!(None, plan.find_work());
     }
+
+    // Test that two outputs from one rule can be handled as inputs to the next.
+    #[test]
+    fn plantest_double_output_direct() {
+        let mut plantest = PlanTest::new();
+        plantest.assert_parse(concat!(
+            "build out: cat mid1 mid2\n",
+            "build mid1 mid2: cat in\n").as_bytes());
+        plantest.assert_with_node_mut(b"mid1", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"mid2", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"out", Node::mark_dirty);
+
+        let out_node_idx = plantest.assert_node_idx(b"out");
+        let mut state = plantest.state.borrow_mut();
+        let state = &mut *state;
+        let plan = &mut plantest.other.plan;
+        assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
+        assert_eq!(true, plan.more_to_do());
+
+        let edge_idx = plan.find_work().unwrap();  // cat in
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat mid1 mid2
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        assert_eq!(None, plan.find_work()); // done
+    }
+
+    // Test that two outputs from one rule can eventually be routed to another.
+    #[test]
+    fn plantest_double_output_indirect() {
+        let mut plantest = PlanTest::new();
+        plantest.assert_parse(concat!(
+            "build out: cat b1 b2\n",
+            "build b1: cat a1\n",
+            "build b2: cat a2\n",
+            "build a1 a2: cat in\n").as_bytes());
+        plantest.assert_with_node_mut(b"a1", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"a2", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"b1", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"b2", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"out", Node::mark_dirty);
+
+        let out_node_idx = plantest.assert_node_idx(b"out");
+        let mut state = plantest.state.borrow_mut();
+        let state = &mut *state;
+        let plan = &mut plantest.other.plan;
+        assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
+        assert_eq!(true, plan.more_to_do());
+
+        let edge_idx = plan.find_work().unwrap();  // cat in
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat a1
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat a2
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat b1 b2
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        assert_eq!(None, plan.find_work()); // done
+    }
+
+    // Test that two edges from one output can both execute.
+    #[test]
+    fn plantest_double_dependent() {
+        let mut plantest = PlanTest::new();
+        plantest.assert_parse(concat!(
+            "build out: cat a1 a2\n",
+            "build a1: cat mid\n",
+            "build a2: cat mid\n",
+            "build mid: cat in\n").as_bytes());
+        plantest.assert_with_node_mut(b"mid", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"a1", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"a2", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"out", Node::mark_dirty);
+
+        let out_node_idx = plantest.assert_node_idx(b"out");
+        let mut state = plantest.state.borrow_mut();
+        let state = &mut *state;
+        let plan = &mut plantest.other.plan;
+        assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
+        assert_eq!(true, plan.more_to_do());
+
+        let edge_idx = plan.find_work().unwrap();  // cat in
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat mid
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat mid
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();  // cat a1 a2
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        assert_eq!(None, plan.find_work()); // done
+    }
+
+    fn test_pool_with_depth_one_helper(plantest: &mut PlanTest, test_case: &[u8]) {
+        plantest.assert_parse(test_case);
+        plantest.assert_with_node_mut(b"out1", Node::mark_dirty);
+        plantest.assert_with_node_mut(b"out2", Node::mark_dirty);
+        
+        let out1_node_idx = plantest.assert_node_idx(b"out1");
+        let out2_node_idx = plantest.assert_node_idx(b"out2");
+
+        let mut state = plantest.state.borrow_mut();
+        let state = &mut *state;
+        let plan = &mut plantest.other.plan;
+        assert_eq!(Ok(true), plan.add_target(state, out1_node_idx));
+        assert_eq!(Ok(true), plan.add_target(state, out2_node_idx));
+
+        assert_eq!(true, plan.more_to_do());
+
+        let edge_idx = plan.find_work().unwrap();
+        {
+            let edge = state.edge_state.get_edge(edge_idx);
+            let edge_in0_idx = edge.inputs.get(0).cloned().unwrap();
+            let edge_in0_node = state.node_state.get_node(edge_in0_idx);
+            assert_eq!(b"in".as_ref(), edge_in0_node.path());
+            let edge_out0_idx = edge.outputs.get(0).cloned().unwrap();
+            let edge_out0_node = state.node_state.get_node(edge_out0_idx);
+            assert_eq!(b"out1".as_ref(), edge_out0_node.path());
+        }
+        
+        // This will be false since poolcat is serialized
+        assert!(plan.find_work().is_none());
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge_idx = plan.find_work().unwrap();
+        {
+            let edge = state.edge_state.get_edge(edge_idx);
+            let edge_in0_idx = edge.inputs.get(0).cloned().unwrap();
+            let edge_in0_node = state.node_state.get_node(edge_in0_idx);
+            assert_eq!(b"in".as_ref(), edge_in0_node.path());
+            let edge_out0_idx = edge.outputs.get(0).cloned().unwrap();
+            let edge_out0_node = state.node_state.get_node(edge_out0_idx);
+            assert_eq!(b"out2".as_ref(), edge_out0_node.path());
+        }
+        
+        // This will be false since poolcat is serialized
+        assert!(plan.find_work().is_none());
+        plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        assert_eq!(false, plan.more_to_do());
+        assert_eq!(None, plan.find_work()); // done
+    }
+
+    #[test]
+    fn plantest_pool_with_depth_one() {
+        let mut plantest = PlanTest::new();
+        test_pool_with_depth_one_helper(&mut plantest, concat!(
+          "pool foobar\n",
+          "  depth = 1\n",
+          "rule poolcat\n",
+          "  command = cat $in > $out\n",
+          "  pool = foobar\n",
+          "build out1: poolcat in\n",
+          "build out2: poolcat in\n"          
+        ).as_bytes());
+    }
+
+    #[test]
+    fn plantest_console_pool() {
+        let mut plantest = PlanTest::new();
+        test_pool_with_depth_one_helper(&mut plantest, concat!(
+          "rule poolcat\n",
+          "  command = cat $in > $out\n",
+          "  pool = console\n",
+          "build out1: poolcat in\n",
+          "build out2: poolcat in\n",
+        ).as_bytes());
+    }
+
+    /// Because FindWork does not return Edges in any sort of predictable order,
+    // provide a means to get available Edges in order and in a format which is
+    // easy to write tests around.
+    fn find_work_sorted_helper(plan: &mut Plan, state: &State, count: usize) -> VecDeque<EdgeIndex> {
+        let mut result = (0..count).map(|i| {
+            assert!(plan.more_to_do());
+            plan.find_work().unwrap()
+        }).collect::<Vec<_>>();
+
+        assert!(plan.find_work().is_none());
+        result.sort_by_key(|e| {
+            state.node_state.get_node(state.edge_state.get_edge(*e).outputs[0]).path()
+        });
+        result.into_iter().collect()
+    }
+
+    #[test]
+    fn plantest_pools_with_depth_two() {
+        let mut plantest = PlanTest::new();
+        plantest.assert_parse(concat!(
+            "pool foobar\n",
+            "  depth = 2\n",
+            "pool bazbin\n",
+            "  depth = 2\n",
+            "rule foocat\n",
+            "  command = cat $in > $out\n",
+            "  pool = foobar\n",
+            "rule bazcat\n",
+            "  command = cat $in > $out\n",
+            "  pool = bazbin\n",
+            "build out1: foocat in\n",
+            "build out2: foocat in\n",
+            "build out3: foocat in\n",
+            "build outb1: bazcat in\n",
+            "build outb2: bazcat in\n",
+            "build outb3: bazcat in\n",
+            "  pool =\n",
+            "build allTheThings: cat out1 out2 out3 outb1 outb2 outb3\n"
+        ).as_bytes());
+        [b"out1".as_ref(), b"out2".as_ref(), b"out3".as_ref(), b"outb1".as_ref(), b"outb2".as_ref(), b"outb3".as_ref(), b"allTheThings".as_ref()]
+            .as_ref().iter().for_each(|path| {
+            plantest.assert_with_node_mut(path, Node::mark_dirty);
+        });
+
+        let mut state = plantest.state.borrow_mut();
+        let state = &mut *state;
+        let plan = &mut plantest.other.plan;
+        let all_the_things_node = state.node_state.lookup_node(b"allTheThings").unwrap();
+        assert_eq!(Ok(true), plan.add_target(state, all_the_things_node));
+
+        let mut edges = find_work_sorted_helper(plan, state, 5);
+        {
+            let edge_idx = edges[0];
+            let edge = state.edge_state.get_edge(edge_idx);
+            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
+            assert_eq!(b"out1".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        {
+            let edge_idx = edges[1];
+            let edge = state.edge_state.get_edge(edge_idx);
+            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
+            assert_eq!(b"out2".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        {
+            let edge_idx = edges[2];
+            let edge = state.edge_state.get_edge(edge_idx);
+            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
+            assert_eq!(b"outb1".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        {
+            let edge_idx = edges[3];
+            let edge = state.edge_state.get_edge(edge_idx);
+            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
+            assert_eq!(b"outb2".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        {
+            let edge_idx = edges[4];
+            let edge = state.edge_state.get_edge(edge_idx);
+            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
+            assert_eq!(b"outb3".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        // finish out1
+        plan.edge_finished(state, edges.pop_front().unwrap(), EdgeResult::EdgeSucceeded);
+
+        let out3_idx = plan.find_work().unwrap();
+        {
+            let edge = state.edge_state.get_edge(out3_idx);
+            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
+            assert_eq!(b"out3".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        assert!(plan.find_work().is_none());
+        plan.edge_finished(state, out3_idx, EdgeResult::EdgeSucceeded);
+        assert!(plan.find_work().is_none());
+        
+        edges.into_iter().for_each(|edge_idx| {
+            plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
+        });
+
+        let last_idx = plan.find_work().unwrap();
+        {
+            let edge = state.edge_state.get_edge(last_idx);
+            assert_eq!(b"allTheThings".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+        }
+        plan.edge_finished(state, last_idx, EdgeResult::EdgeSucceeded);
+
+        assert_eq!(false, plan.more_to_do());
+        assert_eq!(None, plan.find_work()); // done
+    }
 /*
-
-// Test that two outputs from one rule can be handled as inputs to the next.
-TEST_F(PlanTest, DoubleOutputDirect) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
-"build out: cat mid1 mid2\n"
-"build mid1 mid2: cat in\n"));
-  GetNode("mid1")->MarkDirty();
-  GetNode("mid2")->MarkDirty();
-  GetNode("out")->MarkDirty();
-
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
-
-  Edge* edge;
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat in
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat mid1 mid2
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_FALSE(edge);  // done
-}
-
-// Test that two outputs from one rule can eventually be routed to another.
-TEST_F(PlanTest, DoubleOutputIndirect) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
-"build out: cat b1 b2\n"
-"build b1: cat a1\n"
-"build b2: cat a2\n"
-"build a1 a2: cat in\n"));
-  GetNode("a1")->MarkDirty();
-  GetNode("a2")->MarkDirty();
-  GetNode("b1")->MarkDirty();
-  GetNode("b2")->MarkDirty();
-  GetNode("out")->MarkDirty();
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
-
-  Edge* edge;
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat in
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat a1
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat a2
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat b1 b2
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_FALSE(edge);  // done
-}
-
-// Test that two edges from one output can both execute.
-TEST_F(PlanTest, DoubleDependent) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
-"build out: cat a1 a2\n"
-"build a1: cat mid\n"
-"build a2: cat mid\n"
-"build mid: cat in\n"));
-  GetNode("mid")->MarkDirty();
-  GetNode("a1")->MarkDirty();
-  GetNode("a2")->MarkDirty();
-  GetNode("out")->MarkDirty();
-
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
-
-  Edge* edge;
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat in
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat mid
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat mid
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);  // cat a1 a2
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_FALSE(edge);  // done
-}
-
-void PlanTest::TestPoolWithDepthOne(const char* test_case) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_, test_case));
-  GetNode("out1")->MarkDirty();
-  GetNode("out2")->MarkDirty();
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out1"), &err));
-  ASSERT_EQ("", err);
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out2"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
-
-  Edge* edge = plan_.FindWork();
-  ASSERT_TRUE(edge);
-  ASSERT_EQ("in",  edge->inputs_[0]->path());
-  ASSERT_EQ("out1", edge->outputs_[0]->path());
-
-  // This will be false since poolcat is serialized
-  ASSERT_FALSE(plan_.FindWork());
-
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  edge = plan_.FindWork();
-  ASSERT_TRUE(edge);
-  ASSERT_EQ("in", edge->inputs_[0]->path());
-  ASSERT_EQ("out2", edge->outputs_[0]->path());
-
-  ASSERT_FALSE(plan_.FindWork());
-
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  ASSERT_FALSE(plan_.more_to_do());
-  edge = plan_.FindWork();
-  ASSERT_EQ(0, edge);
-}
-
-TEST_F(PlanTest, PoolWithDepthOne) {
-  TestPoolWithDepthOne(
-"pool foobar\n"
-"  depth = 1\n"
-"rule poolcat\n"
-"  command = cat $in > $out\n"
-"  pool = foobar\n"
-"build out1: poolcat in\n"
-"build out2: poolcat in\n");
-}
-
-TEST_F(PlanTest, ConsolePool) {
-  TestPoolWithDepthOne(
-"rule poolcat\n"
-"  command = cat $in > $out\n"
-"  pool = console\n"
-"build out1: poolcat in\n"
-"build out2: poolcat in\n");
-}
-
-TEST_F(PlanTest, PoolsWithDepthTwo) {
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
-"pool foobar\n"
-"  depth = 2\n"
-"pool bazbin\n"
-"  depth = 2\n"
-"rule foocat\n"
-"  command = cat $in > $out\n"
-"  pool = foobar\n"
-"rule bazcat\n"
-"  command = cat $in > $out\n"
-"  pool = bazbin\n"
-"build out1: foocat in\n"
-"build out2: foocat in\n"
-"build out3: foocat in\n"
-"build outb1: bazcat in\n"
-"build outb2: bazcat in\n"
-"build outb3: bazcat in\n"
-"  pool =\n"
-"build allTheThings: cat out1 out2 out3 outb1 outb2 outb3\n"
-));
-  // Mark all the out* nodes dirty
-  for (int i = 0; i < 3; ++i) {
-    GetNode("out" + string(1, '1' + static_cast<char>(i)))->MarkDirty();
-    GetNode("outb" + string(1, '1' + static_cast<char>(i)))->MarkDirty();
-  }
-  GetNode("allTheThings")->MarkDirty();
-
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("allTheThings"), &err));
-  ASSERT_EQ("", err);
-
-  deque<Edge*> edges;
-  FindWorkSorted(&edges, 5);
-
-  for (int i = 0; i < 4; ++i) {
-    Edge *edge = edges[i];
-    ASSERT_EQ("in",  edge->inputs_[0]->path());
-    string base_name(i < 2 ? "out" : "outb");
-    ASSERT_EQ(base_name + string(1, '1' + (i % 2)), edge->outputs_[0]->path());
-  }
-
-  // outb3 is exempt because it has an empty pool
-  Edge* edge = edges[4];
-  ASSERT_TRUE(edge);
-  ASSERT_EQ("in",  edge->inputs_[0]->path());
-  ASSERT_EQ("outb3", edge->outputs_[0]->path());
-
-  // finish out1
-  plan_.EdgeFinished(edges.front(), Plan::kEdgeSucceeded);
-  edges.pop_front();
-
-  // out3 should be available
-  Edge* out3 = plan_.FindWork();
-  ASSERT_TRUE(out3);
-  ASSERT_EQ("in",  out3->inputs_[0]->path());
-  ASSERT_EQ("out3", out3->outputs_[0]->path());
-
-  ASSERT_FALSE(plan_.FindWork());
-
-  plan_.EdgeFinished(out3, Plan::kEdgeSucceeded);
-
-  ASSERT_FALSE(plan_.FindWork());
-
-  for (deque<Edge*>::iterator it = edges.begin(); it != edges.end(); ++it) {
-    plan_.EdgeFinished(*it, Plan::kEdgeSucceeded);
-  }
-
-  Edge* last = plan_.FindWork();
-  ASSERT_TRUE(last);
-  ASSERT_EQ("allTheThings", last->outputs_[0]->path());
-
-  plan_.EdgeFinished(last, Plan::kEdgeSucceeded);
-
-  ASSERT_FALSE(plan_.more_to_do());
-  ASSERT_FALSE(plan_.FindWork());
-}
-
 TEST_F(PlanTest, PoolWithRedundantEdges) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
     "pool compile\n"

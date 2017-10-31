@@ -43,6 +43,16 @@ pub struct Node {
     /// forward slashes by CanonicalizePath. See |PathDecanonicalized|.
     slash_bits: u64,
 
+    /// The Edge that produces this Node, or NULL when there is no
+    /// known edge to produce it.
+    in_edge: Option<EdgeIndex>,
+
+    /// All Edges that use this Node as an input.
+    out_edges: Vec<EdgeIndex>,
+
+    /// A dense integer id for the node, assigned and used by DepsLog.
+    id: isize,
+
     /// Possible values of mtime_:
     ///   -1: file hasn't been examined
     ///   0:  we looked, and file doesn't exist
@@ -53,28 +63,18 @@ pub struct Node {
     /// But note that Edge::outputs_ready_ is also used in judging which
     /// edges to build.
     dirty: bool,
-
-    /// The Edge that produces this Node, or NULL when there is no
-    /// known edge to produce it.
-    in_edge: Option<EdgeIndex>,
-
-    /// All Edges that use this Node as an input.
-    out_edges: Vec<EdgeIndex>,
-
-    /// A dense integer id for the node, assigned and used by DepsLog.
-    id: isize,
 }
 
 impl Node {
     pub fn new(path: &[u8], slash_bits: u64) -> Self {
         Node {
-        path: path.to_owned(),
-        slash_bits,
-        mtime: TimeStamp(-1),
-        dirty: false,
-        in_edge: None,
-        out_edges: Vec::new(),
-        id: -1
+            path: path.to_owned(),
+            slash_bits,
+            in_edge: None,
+            out_edges: Vec::new(),
+            id: -1,
+            mtime: TimeStamp(-1),
+            dirty: false,
         }
     }
 
@@ -182,7 +182,7 @@ private:
 };
 */
 
-
+#[derive(Clone, Copy)]
 pub enum EdgeVisitMark {
   VisitNone,
   VisitInStack,
@@ -196,9 +196,9 @@ pub struct Edge {
     pub inputs: Vec<NodeIndex>,
     pub outputs: Vec<NodeIndex>,
     pub env: Rc<RefCell<BindingEnv>>,
-    pub mark: EdgeVisitMark,
+    pub mark: Cell<EdgeVisitMark>,
     pub outputs_ready: Cell<bool>,
-    deps_missing: bool,
+    pub deps_missing: Cell<bool>,
     pub implicit_deps: usize,
     pub order_only_deps: usize,
     pub implicit_outs: usize,
@@ -212,9 +212,9 @@ impl Edge {
           inputs: Vec::new(),
           outputs: Vec::new(),
           env,
-          mark: EdgeVisitMark::VisitNone,
+          mark: Cell::new(EdgeVisitMark::VisitNone),
           outputs_ready: Cell::new(false),
-          deps_missing: false,
+          deps_missing: Cell::new(false),
           implicit_deps: 0,
           order_only_deps: 0,
           implicit_outs: 0
@@ -356,9 +356,32 @@ struct Edge {
   void Dump(const char* prefix="") const;
 };
 
-
+*/
 /// ImplicitDepLoader loads implicit dependencies, as referenced via the
 /// "depfile" attribute in build files.
+struct ImplicitDepLoader<'b, 'c> {
+    disk_interface: &'c DiskInterface,
+    deps_log: &'b DepsLog,
+}
+
+impl<'b, 'c> ImplicitDepLoader<'b, 'c> {
+    pub fn new(deps_log: &'b DepsLog, disk_interface: &'c DiskInterface) -> Self {
+        ImplicitDepLoader {
+            deps_log,
+            disk_interface,
+        }
+    }
+
+    /// Load implicit dependencies for \a edge.
+    /// @return false on error (without filling \a err if info is just missing
+    //                          or out of date).
+    pub fn load_deps(&self, state: &State, edge_idx: EdgeIndex) -> Result<bool, String> {
+        unimplemented!{}
+    }
+
+}
+
+/*
 struct ImplicitDepLoader {
   ImplicitDepLoader(State* state, DepsLog* deps_log,
                     DiskInterface* disk_interface)
@@ -400,14 +423,20 @@ struct ImplicitDepLoader {
 
 /// DependencyScan manages the process of scanning the files in a graph
 /// and updating the dirty/outputs_ready state of all the nodes and edges.
-pub struct DependencyScan {
-
+pub struct DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
+    build_log: &'a BuildLog<'s>,
+    deps_log: &'b DepsLog,
+    disk_interface: &'c DiskInterface,
+    dep_loader: ImplicitDepLoader<'b, 'c>
 }
 
-impl DependencyScan {
-    pub fn new(state: &State, build_log: &BuildLog, deps_log: &DepsLog, disk_interface: &DiskInterface) -> Self {
+impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
+    pub fn new(build_log: &'a BuildLog<'s>, deps_log: &'b DepsLog, disk_interface: &'c DiskInterface) -> Self {
         DependencyScan {
-
+            build_log,
+            deps_log,
+            disk_interface,
+            dep_loader: ImplicitDepLoader::new(deps_log, disk_interface)
         }
     }
 
@@ -416,16 +445,126 @@ impl DependencyScan {
     /// needs to be re-run, and update outputs_ready_ and each outputs' |dirty_|
     /// state accordingly.
     /// Returns false on failure.
-    pub fn recompute_dirty(&self, node: NodeIndex) -> Result<(), String> {
+    pub fn recompute_dirty(&self, state: &mut State, node_idx: NodeIndex) -> Result<(), String> {
         let mut stack = Vec::new();
-        return self.recompute_dirty_inner(node, &mut stack);
+        return self.recompute_dirty_inner(state, node_idx, &mut stack);
     }
 
-    fn recompute_dirty_inner(&self, node: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {
-        //return Ok(());
+    fn recompute_dirty_inner(&self, state: &mut State, node_idx: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {        
+        match state.node_state.get_node(node_idx).in_edge.as_ref() {
+          None => {
+              let node = state.node_state.get_node_mut(node_idx);
+              // If we already visited this leaf node then we are done.
+              if node.status_known() {
+                  return Ok(());
+              };
+              // This node has no in-edge; it is dirty if it is missing.
+              node.stat_if_necessary(self.disk_interface)?;
+              if !node.exists() {
+                  explain!("{} has no in-edge and is missing", String::from_utf8_lossy(node.path()));
+              }
+              let dirty = !node.exists();
+              node.set_dirty(dirty);
+              Ok(())
+          },
+          Some(&in_edge_idx) => {
+              let edge = state.edge_state.get_edge(in_edge_idx);
+
+              // If we already finished this edge then we are done.
+              match edge.mark.get() {
+                  EdgeVisitMark::VisitDone => {return Ok(());},
+                  _ => {},
+              };
+
+              // If we encountered this edge earlier in the call stack we have a cycle.
+              self.verify_dag(state, node_idx, stack)?;
+
+              // Mark the edge temporarily while in the call stack.
+              edge.mark.set(EdgeVisitMark::VisitInStack);
+              stack.push(node_idx);
+
+              let mut dirty = false;
+              edge.outputs_ready.set(true);
+              edge.deps_missing.set(false);
+
+              // Load output mtimes so we can compare them to the most recent input below.
+              for o_idx in edge.outputs.iter().cloned() {
+                  state.node_state.get_node_mut(o_idx).stat_if_necessary(self.disk_interface)?;
+              };
+
+              if !self.dep_loader.load_deps(state, in_edge_idx)? {
+                  // Failed to load dependency info: rebuild to regenerate it.
+                  // LoadDeps() did EXPLAIN() already, no need to do it here.
+                  dirty = true;
+                  edge.deps_missing.set(true);
+              }
+
+              unimplemented!();
+/*
+
+  // Visit all inputs; we're dirty if any of the inputs are dirty.
+  Node* most_recent_input = NULL;
+  for (vector<Node*>::iterator i = edge->inputs_.begin();
+       i != edge->inputs_.end(); ++i) {
+    // Visit this input.
+    if (!RecomputeDirty(*i, stack, err))
+      return false;
+
+    // If an input is not ready, neither are our outputs.
+    if (Edge* in_edge = (*i)->in_edge()) {
+      if (!in_edge->outputs_ready_)
+        edge->outputs_ready_ = false;
+    }
+
+    if (!edge->is_order_only(i - edge->inputs_.begin())) {
+      // If a regular input is dirty (or missing), we're dirty.
+      // Otherwise consider mtime.
+      if ((*i)->dirty()) {
+        EXPLAIN("%s is dirty", (*i)->path().c_str());
+        dirty = true;
+      } else {
+        if (!most_recent_input || (*i)->mtime() > most_recent_input->mtime()) {
+          most_recent_input = *i;
+        }
+      }
+    }
+  }
+
+  // We may also be dirty due to output state: missing outputs, out of
+  // date outputs, etc.  Visit all outputs and determine whether they're dirty.
+  if (!dirty)
+    if (!RecomputeOutputsDirty(edge, most_recent_input, &dirty, err))
+      return false;
+
+  // Finally, visit each output and update their dirty state if necessary.
+  for (vector<Node*>::iterator o = edge->outputs_.begin();
+       o != edge->outputs_.end(); ++o) {
+    if (dirty)
+      (*o)->MarkDirty();
+  }
+
+  // If an edge is dirty, its outputs are normally not ready.  (It's
+  // possible to be clean but still not be ready in the presence of
+  // order-only inputs.)
+  // But phony edges with no inputs have nothing to do, so are always
+  // ready.
+  if (dirty && !(edge->is_phony() && edge->inputs_.empty()))
+    edge->outputs_ready_ = false;
+*/
+              // Mark the edge as finished during this walk now that it will no longer
+              // be in the call stack.
+
+              edge.mark.set(EdgeVisitMark::VisitDone);
+              debug_assert!(stack.last() == Some(&node_idx));
+              stack.pop();
+              Ok(())
+          },
+        }
+    }
+
+    fn verify_dag(&self, state: &State, node_idx: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {
         unimplemented!()
     }
-
 
 }
 
@@ -482,111 +621,6 @@ struct DependencyScan {
 
 
 /*
-
-bool DependencyScan::RecomputeDirty(Node* node, vector<Node*>* stack,
-                                    string* err) {
-  Edge* edge = node->in_edge();
-  if (!edge) {
-    // If we already visited this leaf node then we are done.
-    if (node->status_known())
-      return true;
-    // This node has no in-edge; it is dirty if it is missing.
-    if (!node->StatIfNecessary(disk_interface_, err))
-      return false;
-    if (!node->exists())
-      EXPLAIN("%s has no in-edge and is missing", node->path().c_str());
-    node->set_dirty(!node->exists());
-    return true;
-  }
-
-  // If we already finished this edge then we are done.
-  if (edge->mark_ == Edge::VisitDone)
-    return true;
-
-  // If we encountered this edge earlier in the call stack we have a cycle.
-  if (!VerifyDAG(node, stack, err))
-    return false;
-
-  // Mark the edge temporarily while in the call stack.
-  edge->mark_ = Edge::VisitInStack;
-  stack->push_back(node);
-
-  bool dirty = false;
-  edge->outputs_ready_ = true;
-  edge->deps_missing_ = false;
-
-  // Load output mtimes so we can compare them to the most recent input below.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
-       o != edge->outputs_.end(); ++o) {
-    if (!(*o)->StatIfNecessary(disk_interface_, err))
-      return false;
-  }
-
-  if (!dep_loader_.LoadDeps(edge, err)) {
-    if (!err->empty())
-      return false;
-    // Failed to load dependency info: rebuild to regenerate it.
-    // LoadDeps() did EXPLAIN() already, no need to do it here.
-    dirty = edge->deps_missing_ = true;
-  }
-
-  // Visit all inputs; we're dirty if any of the inputs are dirty.
-  Node* most_recent_input = NULL;
-  for (vector<Node*>::iterator i = edge->inputs_.begin();
-       i != edge->inputs_.end(); ++i) {
-    // Visit this input.
-    if (!RecomputeDirty(*i, stack, err))
-      return false;
-
-    // If an input is not ready, neither are our outputs.
-    if (Edge* in_edge = (*i)->in_edge()) {
-      if (!in_edge->outputs_ready_)
-        edge->outputs_ready_ = false;
-    }
-
-    if (!edge->is_order_only(i - edge->inputs_.begin())) {
-      // If a regular input is dirty (or missing), we're dirty.
-      // Otherwise consider mtime.
-      if ((*i)->dirty()) {
-        EXPLAIN("%s is dirty", (*i)->path().c_str());
-        dirty = true;
-      } else {
-        if (!most_recent_input || (*i)->mtime() > most_recent_input->mtime()) {
-          most_recent_input = *i;
-        }
-      }
-    }
-  }
-
-  // We may also be dirty due to output state: missing outputs, out of
-  // date outputs, etc.  Visit all outputs and determine whether they're dirty.
-  if (!dirty)
-    if (!RecomputeOutputsDirty(edge, most_recent_input, &dirty, err))
-      return false;
-
-  // Finally, visit each output and update their dirty state if necessary.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
-       o != edge->outputs_.end(); ++o) {
-    if (dirty)
-      (*o)->MarkDirty();
-  }
-
-  // If an edge is dirty, its outputs are normally not ready.  (It's
-  // possible to be clean but still not be ready in the presence of
-  // order-only inputs.)
-  // But phony edges with no inputs have nothing to do, so are always
-  // ready.
-  if (dirty && !(edge->is_phony() && edge->inputs_.empty()))
-    edge->outputs_ready_ = false;
-
-  // Mark the edge as finished during this walk now that it will no longer
-  // be in the call stack.
-  edge->mark_ = Edge::VisitDone;
-  assert(stack->back() == node);
-  stack->pop_back();
-
-  return true;
-}
 
 bool DependencyScan::VerifyDAG(Node* node, vector<Node*>* stack, string* err) {
   Edge* edge = node->in_edge();

@@ -150,7 +150,7 @@ impl DiskInterface for RealDiskInterface {
 
 impl RealDiskInterface {
     /// Whether stat information can be cached.  Only has an effect on Windows.
-    pub fn allow_stat_cache(&mut self, allow: bool) {
+    pub fn allow_stat_cache(&self, allow: bool) {
         return;
         unimplemented!()
     }

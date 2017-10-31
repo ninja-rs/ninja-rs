@@ -228,7 +228,7 @@ impl<'a> NinjaMain<'a> {
         let node_idx = node_idx.unwrap();
 
         {
-            let mut builder = Builder::new(&self.state, &self.config, 
+            let mut builder = Builder::new(&mut self.state, &self.config, 
                 &self.build_log, &self.deps_log, &self.disk_interface);
 
             builder.add_target(node_idx)?;
@@ -321,7 +321,7 @@ impl<'a> NinjaMain<'a> {
 
         self.disk_interface.allow_stat_cache(EXPERIMENTAL_STATCACHE);
 
-        let mut builder = Builder::new(&self.state, &self.config, 
+        let mut builder = Builder::new(&mut self.state, &self.config, 
             &self.build_log, &self.deps_log, &self.disk_interface);
 
         for target in targets.into_iter() {

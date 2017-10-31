@@ -74,8 +74,9 @@ impl Pool {
     }
 
     /// adds the given edge to this Pool to be delayed.
-    pub fn delay_edge(&mut self, edge: EdgeIndex) {
-        unimplemented!()
+    pub fn delay_edge(&mut self, state: &State, edge: EdgeIndex) {
+        assert!(self.depth != 0);
+        self.delayed.push(DelayedEdge(state.edge_state.get_edge(edge).weight(), edge));
     }
 
     /// Pool will add zero or more edges to the ready_queue
@@ -110,24 +111,8 @@ impl Pool {
 /*
 
 struct Pool {
-
-
-
-  /// adds the given edge to this Pool to be delayed.
-  void DelayEdge(Edge* edge);
-
-
-
   /// Dump the Pool and its edges (useful for debugging).
   void Dump() const;
-
- private:
-  string name_;
-
-  static bool WeightedEdgeCmp(const Edge* a, const Edge* b);
-
-  typedef set<Edge*,bool(*)(const Edge*, const Edge*)> DelayedEdges;
-  DelayedEdges delayed_;
 };
 
 /// Global state (file status) for a single run.
@@ -151,17 +136,8 @@ struct State {
   bool AddOut(Edge* edge, StringPiece path, uint64_t slash_bits);
   bool AddDefault(StringPiece path, string* error);
 
-  /// Reset state.  Keeps all nodes and edges, but restores them to the
-  /// state where we haven't yet examined the disk for dirty state.
-  void Reset();
-
   /// Dump the nodes and Pools (useful for debugging).
   void Dump();
-
-  /// @return the root node(s) of the graph. (Root nodes have no output edges).
-  /// @param error where to write the error message if somethings went wrong.
-  vector<Node*> RootNodes(string* error) const;
-  vector<Node*> DefaultNodes(string* error) const;
 
   /// Mapping of path -> Node.
   typedef ExternalStringHashMap<Node*>::Type Paths;
@@ -346,6 +322,8 @@ impl State {
         }
     }
 
+    /// @return the root node(s) of the graph. (Root nodes have no output edges).
+    /// @param error where to write the error message if somethings went wrong.
     pub fn root_nodes(&self) -> Result<Vec<NodeIndex>, String> {
         let mut root_nodes = Vec::new();
         // Search for nodes with no output.
@@ -372,6 +350,8 @@ impl State {
         }
     }
 
+    /// Reset state.  Keeps all nodes and edges, but restores them to the
+    /// state where we haven't yet examined the disk for dirty state.
     pub fn reset(&mut self) {
         for node in self.node_state.nodes.iter_mut() {
             node.reset_state();
@@ -379,7 +359,7 @@ impl State {
 
         for edge in self.edge_state.edges.iter_mut() {
             edge.outputs_ready.set(false);
-            edge.mark = EdgeVisitMark::VisitNone;
+            edge.mark.set(EdgeVisitMark::VisitNone);
         }
     }
 
@@ -457,11 +437,6 @@ void Pool::EdgeScheduled(const Edge& edge) {
 void Pool::EdgeFinished(const Edge& edge) {
   if (depth_ != 0)
     current_use_ -= edge.weight();
-}
-
-void Pool::DelayEdge(Edge* edge) {
-  assert(depth_ != 0);
-  delayed_.insert(edge);
 }
 
 void Pool::RetrieveReadyEdges(set<Edge*>* ready_queue) {
