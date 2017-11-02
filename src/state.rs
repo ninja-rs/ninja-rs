@@ -358,8 +358,8 @@ impl State {
         }
 
         for edge in self.edge_state.edges.iter_mut() {
-            edge.outputs_ready.set(false);
-            edge.mark.set(EdgeVisitMark::VisitNone);
+            edge.outputs_ready = false;
+            edge.mark = EdgeVisitMark::VisitNone;
         }
     }
 

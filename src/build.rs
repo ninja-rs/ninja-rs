@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use super::state::State;
@@ -20,6 +21,7 @@ use super::build_log::BuildLog;
 use super::disk_interface::DiskInterface;
 use super::graph::{NodeIndex, EdgeIndex, DependencyScan};
 use super::exit_status::ExitStatus;
+use super::metrics::Stopwatch;
 
 pub enum EdgeResult {
   EdgeFailed,
@@ -118,6 +120,11 @@ impl Plan {
         return Ok(true);
     }
 
+    /// Number of edges with commands to run.
+    fn command_edge_count(&self) -> usize {
+        return self.command_edges;
+    }
+
     /// Reset state.  Clears want and ready sets.
     fn reset(&mut self) {
         self.command_edges = 0;
@@ -167,7 +174,7 @@ impl Plan {
     }
 
     /// Mark an edge as done building (whether it succeeded or failed).
-    pub fn edge_finished(&mut self, state: &State, edge_idx: EdgeIndex, result: EdgeResult) {
+    pub fn edge_finished(&mut self, state: &mut State, edge_idx: EdgeIndex, result: EdgeResult) {
         let directly_wanted = self.want.get(&edge_idx).unwrap().clone();
         
         {
@@ -189,11 +196,10 @@ impl Plan {
                 }
                 self.want.remove(&edge_idx);
 
-                let edge = state.edge_state.get_edge(edge_idx);
-                edge.outputs_ready.set(true);
+                state.edge_state.get_edge_mut(edge_idx).outputs_ready = true;
 
                 // Check off any nodes we were waiting for with this edge.
-                for output_node_idx in edge.outputs.iter().cloned() {
+                for output_node_idx in state.edge_state.get_edge_mut(edge_idx).outputs.clone().into_iter() {
                     self.node_finished(state, output_node_idx);
                 }
             },
@@ -201,18 +207,19 @@ impl Plan {
         };
     }
 
-    pub fn node_finished(&mut self, state: &State, node_idx: NodeIndex) {
+    pub fn node_finished(&mut self, state: &mut State, node_idx: NodeIndex) {
         // See if we we want any edges from this node.
-        let node = state.node_state.get_node(node_idx);
-        for out_edge_idx in node.out_edges().iter().cloned() {
+        for out_edge_idx in state.node_state.get_node(node_idx).out_edges().to_owned().into_iter() {
             let want_e = self.want.get(&out_edge_idx).cloned();
             if want_e.is_none() {
                 continue;
             }
-
-            let oe = state.edge_state.get_edge(out_edge_idx);
-            if !oe.all_inputs_ready(state) {
-                continue;
+            
+            {
+                let oe = state.edge_state.get_edge(out_edge_idx);
+                if !oe.all_inputs_ready(state) {
+                    continue;
+                }
             }
 
             if want_e.unwrap() {
@@ -244,8 +251,6 @@ struct Plan {
   /// Return false on error.
   bool CleanNode(DependencyScan* scan, Node* node, string* err);
 
-  /// Number of edges with commands to run.
-  int command_edge_count() const { return command_edges_; }
 
   /// Reset state.  Clears want and ready sets.
   void Reset();
@@ -360,21 +365,26 @@ struct BuildConfig {
 */
 
 /// Builder wraps the build process: starting commands, updating status.
-pub struct Builder<'s, 'a, 'b, 'c> where 's : 'a {
+pub struct Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
     state: &'s mut State,
+    config: &'p BuildConfig,
     plan: Plan,
-
+    command_runner: Option<Box<CommandRunner + 'p>>,
     scan: DependencyScan<'s, 'a, 'b, 'c>,
+    status: BuildStatus<'p>,
 }
 
-impl<'s, 'a, 'b, 'c> Builder<'s, 'a, 'b, 'c> where 's : 'a {
-    pub fn new(state: &'s mut State, config: &BuildConfig, 
+impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
+    pub fn new(state: &'s mut State, config: &'p BuildConfig, 
           build_log: &'a BuildLog<'s>, deps_log: &'b DepsLog,
           disk_interface: &'c DiskInterface) -> Self {
         Builder {
             state,
+            config,
             plan: Plan::new(),
-            scan: DependencyScan::new(build_log, deps_log, disk_interface)
+            command_runner: None,
+            scan: DependencyScan::new(build_log, deps_log, disk_interface),
+            status: BuildStatus::new(config)
         }
     }
 
@@ -402,6 +412,104 @@ impl<'s, 'a, 'b, 'c> Builder<'s, 'a, 'b, 'c> where 's : 'a {
     /// Run the build.  Returns false on error.
     /// It is an error to call this function when AlreadyUpToDate() is true.
     pub fn build(&mut self) -> Result<(), String> {
+        assert!(!self.is_already_up_to_date());
+
+        self.status.plan_has_total_edges(self.plan.command_edge_count());
+
+        let pending_commands = 0;
+        let failures_allowed = self.config.failures_allowed;
+
+        // Set up the command runner if we haven't done so already.
+        let config = self.config;
+        let command_runner = self.command_runner.get_or_insert_with(|| {
+          if config.dry_run {
+              Box::new(DryRunCommandRunner::new())
+          } else {
+              Box::new(RealCommandRunner::new(config))
+          }
+        });
+
+        // We are about to start the build process.
+        self.status.build_started();
+        
+
+/*
+
+  // We are about to start the build process.
+  status_->BuildStarted();
+
+  // This main loop runs the entire build process.
+  // It is structured like this:
+  // First, we attempt to start as many commands as allowed by the
+  // command runner.
+  // Second, we attempt to wait for / reap the next finished command.
+  while (plan_.more_to_do()) {
+    // See if we can start any more commands.
+    if (failures_allowed && command_runner_->CanRunMore()) {
+      if (Edge* edge = plan_.FindWork()) {
+        if (!StartEdge(edge, err)) {
+          Cleanup();
+          status_->BuildFinished();
+          return false;
+        }
+
+        if (edge->is_phony()) {
+          plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
+        } else {
+          ++pending_commands;
+        }
+
+        // We made some progress; go back to the main loop.
+        continue;
+      }
+    }
+
+    // See if we can reap any finished commands.
+    if (pending_commands) {
+      CommandRunner::Result result;
+      if (!command_runner_->WaitForCommand(&result) ||
+          result.status == ExitInterrupted) {
+        Cleanup();
+        status_->BuildFinished();
+        *err = "interrupted by user";
+        return false;
+      }
+
+      --pending_commands;
+      if (!FinishCommand(&result, err)) {
+        Cleanup();
+        status_->BuildFinished();
+        return false;
+      }
+
+      if (!result.success()) {
+        if (failures_allowed)
+          failures_allowed--;
+      }
+
+      // We made some progress; start the main loop over.
+      continue;
+    }
+
+    // If we get here, we cannot make any more progress.
+    status_->BuildFinished();
+    if (failures_allowed == 0) {
+      if (config_.failures_allowed > 1)
+        *err = "subcommands failed";
+      else
+        *err = "subcommand failed";
+    } else if (failures_allowed < config_.failures_allowed)
+      *err = "cannot make progress due to previous errors";
+    else
+      *err = "stuck [this is a bug]";
+
+    return false;
+  }
+
+  status_->BuildFinished();
+  return true;
+*/
+
         unimplemented!()
     }
 
@@ -449,8 +557,36 @@ struct Builder {
   Builder(const Builder &other);        // DO NOT IMPLEMENT
   void operator=(const Builder &other); // DO NOT IMPLEMENT
 };
-
+*/
 /// Tracks the status of a build: completion fraction, printing updates.
+struct BuildStatus<'a> {
+    config: &'a BuildConfig,
+
+    total_edges: Cell<usize>,
+}
+
+impl<'a> BuildStatus<'a> {
+    pub fn new(config: &'a BuildConfig) -> Self {
+        BuildStatus {
+            config,
+
+            total_edges: Cell::new(0),
+        }
+    }
+
+    pub fn plan_has_total_edges(&self, total: usize) {
+        self.total_edges.set(total);
+    }
+
+    pub fn build_started(&self) {
+        unimplemented!{}
+    }
+
+    pub fn build_finished(&self) {
+        unimplemented!{}
+    }
+}
+/*
 struct BuildStatus {
   explicit BuildStatus(const BuildConfig& config);
   void PlanHasTotalEdges(int total);
@@ -500,7 +636,27 @@ struct BuildStatus {
     else
       snprintf(buf, S, format, rate);
   }
+*/
 
+struct RateInfo {
+    rate: f64,
+    stopwatch: Stopwatch,
+}
+
+impl RateInfo {
+    pub fn new() -> Self {
+        RateInfo {
+            rate: -1f64,
+            stopwatch: Stopwatch::new(),
+        }
+    }
+
+    pub fn restart(&mut self) {
+        self.stopwatch.restart()
+    }
+}
+
+/*
   struct RateInfo {
     RateInfo() : rate_(-1) {}
 
@@ -600,6 +756,14 @@ use std::collections::VecDeque;
 
 struct DryRunCommandRunner {
     finished: VecDeque<EdgeIndex>
+}
+
+impl DryRunCommandRunner {
+    pub fn new() -> Self {
+        DryRunCommandRunner{
+            finished: VecDeque::new(),
+        }
+    }
 }
 
 impl CommandRunner for DryRunCommandRunner {
@@ -900,7 +1064,35 @@ void Plan::Dump() {
   }
   printf("ready: %d\n", (int)ready_.size());
 }
+*/
 
+struct RealCommandRunner<'a> {
+    config: &'a BuildConfig,
+}
+
+impl<'a> RealCommandRunner<'a> {
+    pub fn new(config: &'a BuildConfig) -> Self {
+        RealCommandRunner {
+            config,
+        }
+    }
+}
+
+impl<'a> CommandRunner for RealCommandRunner<'a> {
+    fn can_run_more(&self) -> bool {
+        unimplemented!{}
+    }
+    
+    fn start_command(&mut self, edge: EdgeIndex) -> bool {
+        unimplemented!{}
+    }
+
+    fn wait_for_command(&mut self) -> Option<CommandRunnerResult> {
+        unimplemented!{}
+    }
+}
+
+/*
 struct RealCommandRunner : public CommandRunner {
   explicit RealCommandRunner(const BuildConfig& config) : config_(config) {}
   virtual ~RealCommandRunner() {}

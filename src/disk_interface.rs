@@ -143,8 +143,34 @@ impl DiskInterface for RealDiskInterface {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
-        unimplemented!()
+        use std::os::unix::fs::MetadataExt;
+        metric_record!("node stat");
+        path.metadata().map(|m| {
+            TimeStamp(m.st_mtime() as isize)
+        }).or_else(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                Ok(TimeStamp(0))
+            } else {
+                Err(format!("Stat({}): {}", path.display(), e))
+            }
+        })
+    }
+
+    #[cfg(windows)]
+    fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
+        use std::os::windows::fs::MetadataExt;
+        metric_record!("node stat");
+        path.metadata().map(|m| {
+            TimeStamp(m.last_write_time() as isize)
+        }).or_else(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                Ok(TimeStamp(0))
+            } else {
+                Err(format!("Stat({}): {}", path.display(), e))
+            }
+        })
     }
 }
 

@@ -26,7 +26,7 @@ use super::eval_env::{Env, Rule, BindingEnv};
 use super::timestamp::TimeStamp;
 use super::utils::WINDOWS_PATH;
 use super::utils::{decanonicalize_path, pathbuf_from_bytes};
-use super::utils::ExtendFromEscapedSlice;
+use super::utils::{ExtendFromEscapedSlice, RangeContains};
 
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub struct NodeIndex(pub(crate) usize);
@@ -196,9 +196,9 @@ pub struct Edge {
     pub inputs: Vec<NodeIndex>,
     pub outputs: Vec<NodeIndex>,
     pub env: Rc<RefCell<BindingEnv>>,
-    pub mark: Cell<EdgeVisitMark>,
-    pub outputs_ready: Cell<bool>,
-    pub deps_missing: Cell<bool>,
+    pub mark: EdgeVisitMark,
+    pub outputs_ready: bool,
+    pub deps_missing: bool,
     pub implicit_deps: usize,
     pub order_only_deps: usize,
     pub implicit_outs: usize,
@@ -212,9 +212,9 @@ impl Edge {
           inputs: Vec::new(),
           outputs: Vec::new(),
           env,
-          mark: Cell::new(EdgeVisitMark::VisitNone),
-          outputs_ready: Cell::new(false),
-          deps_missing: Cell::new(false),
+          mark: EdgeVisitMark::VisitNone,
+          outputs_ready: false,
+          deps_missing: false,
           implicit_deps: 0,
           order_only_deps: 0,
           implicit_outs: 0
@@ -234,7 +234,7 @@ impl Edge {
     }
 
     pub fn outputs_ready(&self) -> bool { 
-        self.outputs_ready.get()
+        self.outputs_ready
     }
     
     // There are three types of inputs.
@@ -376,6 +376,31 @@ impl<'b, 'c> ImplicitDepLoader<'b, 'c> {
     /// @return false on error (without filling \a err if info is just missing
     //                          or out of date).
     pub fn load_deps(&self, state: &State, edge_idx: EdgeIndex) -> Result<bool, String> {
+        let edge = state.edge_state.get_edge(edge_idx);
+        let deps_type = edge.get_binding(&state.node_state, b"deps");
+        if !deps_type.is_empty() {
+            return self.load_deps_from_log(state, edge_idx);
+        }
+
+        let depfile = edge.get_unescaped_depfile(&state.node_state);
+        if !depfile.is_empty() {
+            return self.load_dep_file(state, edge_idx, &depfile);
+        }
+
+        // No deps to load.
+        return Ok(true);
+    }
+
+    /// Load implicit dependencies for \a edge from a depfile attribute.
+    /// @return false on error (without filling \a err if info is just missing).
+    pub fn load_dep_file(&self, state: &State, edge_idx: EdgeIndex, path: &[u8]) -> Result<bool, String> {
+        unimplemented!{}
+    }
+
+    /// Load implicit dependencies for \a edge from the DepsLog.
+    /// @return false on error (without filling \a err if info is just missing).
+    pub fn load_deps_from_log(&self, state: &State, edge_idx: EdgeIndex) -> Result<bool, String> {
+        return Ok(false);
         unimplemented!{}
     }
 
@@ -397,13 +422,6 @@ struct ImplicitDepLoader {
   }
 
  private:
-  /// Load implicit dependencies for \a edge from a depfile attribute.
-  /// @return false on error (without filling \a err if info is just missing).
-  bool LoadDepFile(Edge* edge, const string& path, string* err);
-
-  /// Load implicit dependencies for \a edge from the DepsLog.
-  /// @return false on error (without filling \a err if info is just missing).
-  bool LoadDepsFromLog(Edge* edge, string* err);
 
   /// Preallocate \a count spaces in the input array on \a edge, returning
   /// an iterator pointing at the first new space.
@@ -467,11 +485,9 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
               node.set_dirty(dirty);
               Ok(())
           },
-          Some(&in_edge_idx) => {
-              let edge = state.edge_state.get_edge(in_edge_idx);
-
+          Some(&edge_idx) => {
               // If we already finished this edge then we are done.
-              match edge.mark.get() {
+              match state.edge_state.get_edge(edge_idx).mark {
                   EdgeVisitMark::VisitDone => {return Ok(());},
                   _ => {},
               };
@@ -479,82 +495,94 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
               // If we encountered this edge earlier in the call stack we have a cycle.
               self.verify_dag(state, node_idx, stack)?;
 
-              // Mark the edge temporarily while in the call stack.
-              edge.mark.set(EdgeVisitMark::VisitInStack);
-              stack.push(node_idx);
-
               let mut dirty = false;
-              edge.outputs_ready.set(true);
-              edge.deps_missing.set(false);
+              let mut outputs_ready = true;
+              let mut deps_missing = false;
+              
+              // Mark the edge temporarily while in the call stack.
+              state.edge_state.get_edge_mut(edge_idx).mark = EdgeVisitMark::VisitInStack;
 
+              stack.push(node_idx);
               // Load output mtimes so we can compare them to the most recent input below.
-              for o_idx in edge.outputs.iter().cloned() {
+              for o_idx in state.edge_state.get_edge(edge_idx).outputs.iter().cloned() {
                   state.node_state.get_node_mut(o_idx).stat_if_necessary(self.disk_interface)?;
               };
 
-              if !self.dep_loader.load_deps(state, in_edge_idx)? {
+              if !self.dep_loader.load_deps(state, edge_idx)? {
                   // Failed to load dependency info: rebuild to regenerate it.
                   // LoadDeps() did EXPLAIN() already, no need to do it here.
                   dirty = true;
-                  edge.deps_missing.set(true);
+                  deps_missing = true;
               }
 
-              unimplemented!();
-/*
+              let mut most_recent_input = None;
+              {
+                  let (order_only_range, inputs) = {
+                      let edge = state.edge_state.get_edge(edge_idx);
+                      (edge.order_only_deps_range(), edge.inputs.clone())
+                  };
+                  
+                  for (i, i_idx) in inputs.into_iter().enumerate() {
+                      // Visit this input.
+                      self.recompute_dirty_inner(state, i_idx, stack)?;
 
-  // Visit all inputs; we're dirty if any of the inputs are dirty.
-  Node* most_recent_input = NULL;
-  for (vector<Node*>::iterator i = edge->inputs_.begin();
-       i != edge->inputs_.end(); ++i) {
-    // Visit this input.
-    if (!RecomputeDirty(*i, stack, err))
-      return false;
+                      // If an input is not ready, neither are our outputs.
+                      if let Some(in_edge) = state.node_state.get_node(i_idx).in_edge() {
+                          if !state.edge_state.get_edge(in_edge).outputs_ready {
+                              outputs_ready = false;
+                          }
+                      }
 
-    // If an input is not ready, neither are our outputs.
-    if (Edge* in_edge = (*i)->in_edge()) {
-      if (!in_edge->outputs_ready_)
-        edge->outputs_ready_ = false;
-    }
+                      if !order_only_range.contains_stable(i) {
+                          // If a regular input is dirty (or missing), we're dirty.
+                          // Otherwise consider mtime.
+                          let i_node = state.node_state.get_node(i_idx);
+                          if i_node.is_dirty() {
+                              explain!("{} is dirty", String::from_utf8_lossy(i_node.path()));
+                              dirty = true;
+                          } else {
+                              if most_recent_input.as_ref().map(|&prev_idx| {
+                                 let prev_node = state.node_state.get_node(prev_idx);
+                                 i_node.mtime() > prev_node.mtime()
+                              }).unwrap_or(true) {
+                                 most_recent_input = Some(i_idx);
+                              }
+                          }
+                      }
+                  }
+              }
+              // We may also be dirty due to output state: missing outputs, out of
+              // date outputs, etc.  Visit all outputs and determine whether they're dirty.
+              if !dirty {
+                  dirty = self.recompute_outputs_dirty(state, edge_idx, most_recent_input)?;
+              }
 
-    if (!edge->is_order_only(i - edge->inputs_.begin())) {
-      // If a regular input is dirty (or missing), we're dirty.
-      // Otherwise consider mtime.
-      if ((*i)->dirty()) {
-        EXPLAIN("%s is dirty", (*i)->path().c_str());
-        dirty = true;
-      } else {
-        if (!most_recent_input || (*i)->mtime() > most_recent_input->mtime()) {
-          most_recent_input = *i;
-        }
-      }
-    }
-  }
+              if dirty {
+                  let edge = state.edge_state.get_edge(edge_idx);
 
-  // We may also be dirty due to output state: missing outputs, out of
-  // date outputs, etc.  Visit all outputs and determine whether they're dirty.
-  if (!dirty)
-    if (!RecomputeOutputsDirty(edge, most_recent_input, &dirty, err))
-      return false;
+                  // Finally, visit each output and update their dirty state if necessary.
+                  for o_idx in edge.outputs.iter().cloned() {
+                      state.node_state.get_node_mut(o_idx).mark_dirty();
+                  }
 
-  // Finally, visit each output and update their dirty state if necessary.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
-       o != edge->outputs_.end(); ++o) {
-    if (dirty)
-      (*o)->MarkDirty();
-  }
+                  // If an edge is dirty, its outputs are normally not ready.  (It's
+                  // possible to be clean but still not be ready in the presence of
+                  // order-only inputs.)
+                  // But phony edges with no inputs have nothing to do, so are always
+                  // ready.
 
-  // If an edge is dirty, its outputs are normally not ready.  (It's
-  // possible to be clean but still not be ready in the presence of
-  // order-only inputs.)
-  // But phony edges with no inputs have nothing to do, so are always
-  // ready.
-  if (dirty && !(edge->is_phony() && edge->inputs_.empty()))
-    edge->outputs_ready_ = false;
-*/
+                  if !(edge.is_phony() && edge.inputs.is_empty()) {
+                      outputs_ready = false;
+                  }
+              }
+
+              let edge = state.edge_state.get_edge_mut(edge_idx);
+              edge.deps_missing = deps_missing;
+              edge.outputs_ready = outputs_ready;
+
               // Mark the edge as finished during this walk now that it will no longer
               // be in the call stack.
-
-              edge.mark.set(EdgeVisitMark::VisitDone);
+              edge.mark = EdgeVisitMark::VisitDone;
               debug_assert!(stack.last() == Some(&node_idx));
               stack.pop();
               Ok(())
@@ -563,8 +591,57 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
     }
 
     fn verify_dag(&self, state: &State, node_idx: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {
+        let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
+
+        // If we have no temporary mark on the edge then we do not yet have a cycle.
+        match state.edge_state.get_edge(edge_idx).mark {
+          EdgeVisitMark::VisitInStack => {},
+          _ => {return Ok(());}
+        };
+
+        // We have this edge earlier in the call stack.  Find it.
+        let mut start = 0;
+        while start < stack.len() {
+            let item = stack[start];
+            if state.node_state.get_node(item).in_edge() == Some(edge_idx) {
+                break;
+            }
+            start += 1;
+        }
+        assert!(start < stack.len());
+
+        // Make the cycle clear by reporting its start as the node at its end
+        // instead of some other output of the starting edge.  For example,
+        // running 'ninja b' on
+        //   build a b: cat c
+        //   build c: cat a
+        // should report a -> c -> a instead of b -> c -> a.
+        stack[start] = node_idx;
+
+        // Construct the error message rejecting the cycle.
+        let mut err = "dependency cycle: ".to_owned();
+        for iter_idx in stack[start..].iter() {
+            err += String::from_utf8_lossy(state.node_state.get_node(*iter_idx).path()).as_ref();
+            err += " -> ";
+        }
+
+        err += String::from_utf8_lossy(state.node_state.get_node(node_idx).path()).as_ref();
+
+        if start + 1 == stack.len() && state.edge_state.get_edge(edge_idx).maybe_phonycycle_diagnostic() {
+            // The manifest parser would have filtered out the self-referencing
+            // input if it were not configured to allow the error.
+            err += " [-w phonycycle=err]";
+        }
+
+        return Err(err);
+    }
+
+    /// Recompute whether any output of the edge is dirty, if so sets |*dirty|.
+    /// Returns false on failure.
+    fn recompute_outputs_dirty(&self, state: &State, edge_idx: EdgeIndex, most_recent_input: Option<NodeIndex>) -> Result<bool, String> {
         unimplemented!()
     }
+
 
 }
 
