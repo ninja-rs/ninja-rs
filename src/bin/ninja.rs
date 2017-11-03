@@ -586,7 +586,7 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
         // N failures and then stop.  For N <= 0, INT_MAX is close enough
         // to infinite for most sane builds.        
         let failures_allowed = failures_allowed.parse::<isize>()
-            .map(|v| if v > 0 { v } else { std::isize::MAX })
+            .map(|v| if v > 0 { v as usize } else { std::usize::MAX })
             .unwrap_or_else(|_| {
                 fatal!("-k parameter not numeric; did you mean -k 0?");
             });

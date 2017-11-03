@@ -15,10 +15,7 @@
 use std;
 use libc;
 use errno;
-#[cfg(windows)]
-use kernel32;
 use num_cpus;
-
 use std::path::PathBuf;
 
 /// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
@@ -84,6 +81,7 @@ macro_rules! error {
 
 #[cfg(windows)]
 pub fn exit() -> ! {
+    use kernel32;
     use std::io::Write;
 
     // On Windows, some tools may inject extra threads.
@@ -709,51 +707,79 @@ string StripAnsiEscapeCodes(const string& in) {
   return stripped;
 }
 
+*/
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-static double CalculateProcessorLoad(uint64_t idle_ticks, uint64_t total_ticks)
-{
-  static uint64_t previous_idle_ticks = 0;
-  static uint64_t previous_total_ticks = 0;
-  static double previous_load = -0.0;
+#[cfg(windows)]
+pub fn get_load_average() -> Option<f64> {
+    use std::mem::zeroed;
+    use winapi;
+    use kernel32;
 
-  uint64_t idle_ticks_since_last_time = idle_ticks - previous_idle_ticks;
-  uint64_t total_ticks_since_last_time = total_ticks - previous_total_ticks;
+    use winapi::FILETIME;
 
-  bool first_call = (previous_total_ticks == 0);
-  bool ticks_not_updated_since_last_call = (total_ticks_since_last_time == 0);
-
-  double load;
-  if (first_call || ticks_not_updated_since_last_call) {
-    load = previous_load;
-  } else {
-    // Calculate load.
-    double idle_to_total_ratio =
-        ((double)idle_ticks_since_last_time) / total_ticks_since_last_time;
-    double load_since_last_call = 1.0 - idle_to_total_ratio;
-
-    // Filter/smooth result when possible.
-    if(previous_load > 0) {
-      load = 0.9 * previous_load + 0.1 * load_since_last_call;
-    } else {
-      load = load_since_last_call;
+    fn filetime_to_tickcount(ft: &FILETIME) -> u64 {
+        ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
     }
-  }
 
-  previous_load = load;
-  previous_total_ticks = total_ticks;
-  previous_idle_ticks = idle_ticks;
+    fn calculate_processor_load(idle_ticks: u64, total_ticks: u64) -> Option<f64> {
+        static mut PREVIOUS_IDLE_TICKS : u64 = 0;
+        static mut PREVIOUS_TOTAL_TICKS : u64 = 0;
+        static mut PREVIOUS_LOAD : Option<f64> = None;
 
-  return load;
+        let (previous_idle_ticks, previous_total_ticks, previous_load) = 
+            unsafe { (PREVIOUS_IDLE_TICKS, PREVIOUS_TOTAL_TICKS, PREVIOUS_LOAD)};
+
+        let idle_ticks_since_last_time = idle_ticks - previous_idle_ticks;
+        let total_ticks_since_last_time = total_ticks - previous_total_ticks;
+        
+        let first_call = previous_total_ticks == 0;
+        let ticks_not_updated_since_last_call = total_ticks_since_last_time == 0;
+
+        let load;
+        if first_call || ticks_not_updated_since_last_call {
+            load = previous_load;
+        } else {
+            // Calculate load.          
+            let idle_to_total_ratio = idle_ticks_since_last_time as f64 / total_ticks_since_last_time as f64;
+            let load_since_last_call = 1.0f64 - idle_to_total_ratio;
+
+            // Filter/smooth result when possible.
+            load = Some(if let Some(previous_load) = previous_load {
+                0.9 * previous_load + 0.1 * load_since_last_call
+            } else {
+                load_since_last_call
+            });
+        }
+
+        unsafe {
+            PREVIOUS_LOAD = load;
+            PREVIOUS_TOTAL_TICKS = total_ticks;
+            PREVIOUS_IDLE_TICKS = idle_ticks;
+        }
+
+        load
+    }
+
+    unsafe {
+        let mut idle_time = zeroed::<FILETIME>();
+        let mut kernel_time = zeroed::<FILETIME>();
+        let mut user_time = zeroed::<FILETIME>();
+
+        if kernel32::GetSystemTimes(&mut idle_time, &mut kernel_time, &mut user_time) == winapi::FALSE {
+            return None;
+        };
+
+        let idle_ticks = filetime_to_tickcount(&idle_time);
+        let total_ticks = filetime_to_tickcount(&kernel_time) + filetime_to_tickcount(&user_time);
+
+        if let Some(processor_load) = calculate_processor_load(idle_ticks, total_ticks) {
+            Some(processor_load * get_processor_count() as f64)
+        } else {
+            None
+        }
+    }
 }
-
-static uint64_t FileTimeToTickCount(const FILETIME & ft)
-{
-  uint64_t high = (((uint64_t)(ft.dwHighDateTime)) << 32);
-  uint64_t low  = ft.dwLowDateTime;
-  return (high | low);
-}
-
+/*
 double GetLoadAverage() {
   FILETIME idle_time, kernel_time, user_time;
   BOOL get_system_time_succeeded =
@@ -794,6 +820,19 @@ double GetLoadAverage() {
   return 1.0 / (1 << SI_LOAD_SHIFT) * si.loads[0];
 }
 #else
+*/
+#[cfg(unix)]
+pub fn get_load_average() -> Option<f64> {
+    let mut load_avg : [f64; 3] = [0.0f64, 0.0f64, 0.0f64];
+    unsafe {
+        if libc::getloadavg(load_avg.as_mut().ptr_mut(), 3) < 0 {
+            return None;
+        }
+    }
+    load_avg[0]
+}
+
+/*
 double GetLoadAverage() {
   double loadavg[3] = { 0.0f, 0.0f, 0.0f };
   if (getloadavg(loadavg, 3) < 0) {

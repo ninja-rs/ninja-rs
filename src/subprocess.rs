@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
+
 /*
 
 #ifndef NINJA_SUBPROCESS_H_
@@ -37,11 +39,15 @@ using namespace std;
 #endif
 
 #include "exit_status.h"
-
+*/
 /// Subprocess wraps a single async subprocess.  It is entirely
 /// passive: it expects the caller to notify it when its fds are ready
 /// for reading, as well as call Finish() to reap the child once done()
 /// is true.
+pub struct Subprocess {
+}
+
+/*
 struct Subprocess {
   ~Subprocess();
 
@@ -78,10 +84,47 @@ struct Subprocess {
 
   friend struct SubprocessSet;
 };
-
+*/
 /// SubprocessSet runs a ppoll/pselect() loop around a set of Subprocesses.
 /// DoWork() waits for any state change in subprocesses; finished_
 /// is a queue of subprocesses as they finish.
+pub struct SubprocessSet<Data = ()> {
+    running: Vec<(Subprocess, Data)>,
+    finished: VecDeque<(Subprocess, Data)>,
+}
+
+type Iter<'a, Data> = ::std::iter::Chain<
+    ::std::collections::vec_deque::Iter<'a, (Subprocess, Data)>,
+    ::std::slice::Iter<'a, (Subprocess, Data)>>;
+
+impl<Data> SubprocessSet<Data> {
+    pub fn new() -> Self {
+        SubprocessSet {
+            running: Vec::new(),
+            finished: VecDeque::new(),
+        }
+    }
+
+    pub fn running(&self) -> &Vec<(Subprocess,Data)> {
+        &self.running
+    }
+
+    pub fn finished(&self) -> &VecDeque<(Subprocess,Data)> {
+        &self.finished
+    }
+
+    pub fn iter<'a>(&'a self) -> Iter<'a, Data> {
+        self.finished.iter().chain(self.running.iter())
+    }
+
+    pub fn clear(&mut self) {
+        self.running.clear();
+        return;
+        unimplemented!{}
+    }
+}
+
+/*
 struct SubprocessSet {
   SubprocessSet();
   ~SubprocessSet();

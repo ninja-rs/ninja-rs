@@ -639,10 +639,23 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
     /// Recompute whether any output of the edge is dirty, if so sets |*dirty|.
     /// Returns false on failure.
     fn recompute_outputs_dirty(&self, state: &State, edge_idx: EdgeIndex, most_recent_input: Option<NodeIndex>) -> Result<bool, String> {
-        unimplemented!()
+        let edge = state.edge_state.get_edge(edge_idx);
+        let command = edge.evaluate_command_with_rsp_file(&state.node_state, true);
+        for output in edge.outputs.iter() {
+            if self.recompute_output_dirty(state, edge_idx, most_recent_input, &command, *output) {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
     }
 
-
+    /// Recompute whether a given single output should be marked dirty.
+    /// Returns true if so.
+    fn recompute_output_dirty(&self, state: &State, edge_idx: EdgeIndex, most_recent_input: Option<NodeIndex>,
+        command: &[u8], output_node_idx: NodeIndex) -> bool {
+          return true;
+          unimplemented!()
+    }
 }
 
 /*
@@ -653,18 +666,6 @@ struct DependencyScan {
       : build_log_(build_log),
         disk_interface_(disk_interface),
         dep_loader_(state, deps_log, disk_interface) {}
-
-  /// Update the |dirty_| state of the given node by inspecting its input edge.
-  /// Examine inputs, outputs, and command lines to judge whether an edge
-  /// needs to be re-run, and update outputs_ready_ and each outputs' |dirty_|
-  /// state accordingly.
-  /// Returns false on failure.
-  bool RecomputeDirty(Node* node, string* err);
-
-  /// Recompute whether any output of the edge is dirty, if so sets |*dirty|.
-  /// Returns false on failure.
-  bool RecomputeOutputsDirty(Edge* edge, Node* most_recent_input,
-                             bool* dirty, string* err);
 
   BuildLog* build_log() const {
     return build_log_;
@@ -681,10 +682,7 @@ struct DependencyScan {
   bool RecomputeDirty(Node* node, vector<Node*>* stack, string* err);
   bool VerifyDAG(Node* node, vector<Node*>* stack, string* err);
 
-  /// Recompute whether a given single output should be marked dirty.
-  /// Returns true if so.
-  bool RecomputeOutputDirty(Edge* edge, Node* most_recent_input,
-                            const string& command, Node* output);
+
 
   BuildLog* build_log_;
   DiskInterface* disk_interface_;
@@ -698,58 +696,6 @@ struct DependencyScan {
 
 
 /*
-
-bool DependencyScan::VerifyDAG(Node* node, vector<Node*>* stack, string* err) {
-  Edge* edge = node->in_edge();
-  assert(edge != NULL);
-
-  // If we have no temporary mark on the edge then we do not yet have a cycle.
-  if (edge->mark_ != Edge::VisitInStack)
-    return true;
-
-  // We have this edge earlier in the call stack.  Find it.
-  vector<Node*>::iterator start = stack->begin();
-  while (start != stack->end() && (*start)->in_edge() != edge)
-    ++start;
-  assert(start != stack->end());
-
-  // Make the cycle clear by reporting its start as the node at its end
-  // instead of some other output of the starting edge.  For example,
-  // running 'ninja b' on
-  //   build a b: cat c
-  //   build c: cat a
-  // should report a -> c -> a instead of b -> c -> a.
-  *start = node;
-
-  // Construct the error message rejecting the cycle.
-  *err = "dependency cycle: ";
-  for (vector<Node*>::const_iterator i = start; i != stack->end(); ++i) {
-    err->append((*i)->path());
-    err->append(" -> ");
-  }
-  err->append((*start)->path());
-
-  if ((start + 1) == stack->end() && edge->maybe_phonycycle_diagnostic()) {
-    // The manifest parser would have filtered out the self-referencing
-    // input if it were not configured to allow the error.
-    err->append(" [-w phonycycle=err]");
-  }
-
-  return false;
-}
-
-bool DependencyScan::RecomputeOutputsDirty(Edge* edge, Node* most_recent_input,
-                                           bool* outputs_dirty, string* err) {
-  string command = edge->EvaluateCommand(/*incl_rsp_file=*/true);
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
-       o != edge->outputs_.end(); ++o) {
-    if (RecomputeOutputDirty(edge, most_recent_input, command, *o)) {
-      *outputs_dirty = true;
-      return true;
-    }
-  }
-  return true;
-}
 
 bool DependencyScan::RecomputeOutputDirty(Edge* edge,
                                           Node* most_recent_input,

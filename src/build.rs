@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use super::state::State;
@@ -22,6 +22,9 @@ use super::disk_interface::DiskInterface;
 use super::graph::{NodeIndex, EdgeIndex, DependencyScan};
 use super::exit_status::ExitStatus;
 use super::metrics::Stopwatch;
+use super::subprocess::SubprocessSet;
+use super::utils::{get_load_average, pathbuf_from_bytes};
+use super::line_printer::LinePrinter;
 
 pub enum EdgeResult {
   EdgeFailed,
@@ -292,30 +295,11 @@ impl CommandRunnerResult {
 pub trait CommandRunner {
     fn can_run_more(&self) -> bool;
     fn start_command(&mut self, edge: EdgeIndex) -> bool;
-
     /// Wait for a command to complete, or return false if interrupted.
     fn wait_for_command(&mut self) -> Option<CommandRunnerResult>;
-    
+    fn get_active_edges(&self) -> Vec<EdgeIndex>;
+    fn abort(&mut self);
 }
-/*
-struct CommandRunner {
-
-
-  /// The result of waiting for a command.
-  struct Result {
-    Result() : edge(NULL) {}
-    Edge* edge;
-    ExitStatus status;
-    string output;
-    bool success() const { return status == ExitSuccess; }
-  };
-  /// Wait for a command to complete, or return false if interrupted.
-  virtual bool WaitForCommand(Result* result) = 0;
-
-  virtual vector<Edge*> GetActiveEdges() { return vector<Edge*>(); }
-  virtual void Abort() {}
-};
-*/
 
 pub enum BuildConfigVerbosity {
     NORMAL,
@@ -327,8 +311,8 @@ pub enum BuildConfigVerbosity {
 pub struct BuildConfig {
     pub verbosity: BuildConfigVerbosity,
     pub dry_run: bool,
-    pub parallelism: isize,
-    pub failures_allowed: isize,
+    pub parallelism: usize,
+    pub failures_allowed: usize,
     pub max_load_average: f64,
 }
 
@@ -370,6 +354,7 @@ pub struct Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
     config: &'p BuildConfig,
     plan: Plan,
     command_runner: Option<Box<CommandRunner + 'p>>,
+    disk_interface: &'c DiskInterface,
     scan: DependencyScan<'s, 'a, 'b, 'c>,
     status: BuildStatus<'p>,
 }
@@ -383,6 +368,7 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
             config,
             plan: Plan::new(),
             command_runner: None,
+            disk_interface,
             scan: DependencyScan::new(build_log, deps_log, disk_interface),
             status: BuildStatus::new(config)
         }
@@ -416,103 +402,152 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
         self.status.plan_has_total_edges(self.plan.command_edge_count());
 
-        let pending_commands = 0;
-        let failures_allowed = self.config.failures_allowed;
+        let mut pending_commands = 0;
+        let mut failures_allowed = self.config.failures_allowed;
 
         // Set up the command runner if we haven't done so already.
         let config = self.config;
-        let command_runner = self.command_runner.get_or_insert_with(|| {
-          if config.dry_run {
-              Box::new(DryRunCommandRunner::new())
-          } else {
-              Box::new(RealCommandRunner::new(config))
-          }
-        });
+        if self.command_runner.is_none() {
+            self.command_runner = Some(if config.dry_run {
+                Box::new(DryRunCommandRunner::new())
+            } else {
+                Box::new(RealCommandRunner::new(config))
+            });
+        }
 
         // We are about to start the build process.
         self.status.build_started();
+
+        // This main loop runs the entire build process.
+        // It is structured like this:
+        // First, we attempt to start as many commands as allowed by the
+        // command runner.
+        // Second, we attempt to wait for / reap the next finished command.
         
+        while self.plan.more_to_do() {
+            // See if we can start any more commands.
+            if failures_allowed > 0 && self.command_runner.as_ref().unwrap().can_run_more() {
+                if let Some(edge_idx) = self.plan.find_work() {
+                    if let Err(e) = self.start_edge(edge_idx) {
+                        self.cleanup();
+                        self.status.build_finished();
+                        return Err(e);
+                    };
 
-/*
+                    if self.state.edge_state.get_edge(edge_idx).is_phony() {
+                        self.plan.edge_finished(self.state, edge_idx, EdgeResult::EdgeSucceeded);
+                    } else {
+                        pending_commands += 1;
+                    }
 
-  // We are about to start the build process.
-  status_->BuildStarted();
+                    // We made some progress; go back to the main loop.
+                    continue;
+                }
+            }
 
-  // This main loop runs the entire build process.
-  // It is structured like this:
-  // First, we attempt to start as many commands as allowed by the
-  // command runner.
-  // Second, we attempt to wait for / reap the next finished command.
-  while (plan_.more_to_do()) {
-    // See if we can start any more commands.
-    if (failures_allowed && command_runner_->CanRunMore()) {
-      if (Edge* edge = plan_.FindWork()) {
-        if (!StartEdge(edge, err)) {
-          Cleanup();
-          status_->BuildFinished();
-          return false;
+            // See if we can reap any finished commands.
+            if pending_commands > 0 {
+                let result = self.command_runner.as_mut().unwrap().wait_for_command();
+
+                if result.is_none() || result.as_ref().unwrap().status == ExitStatus::ExitInterrupted {
+                    self.cleanup();
+                    self.status.build_finished();
+                    return Err("interrupted by user".to_owned());
+                }
+
+                pending_commands -= 1;
+                let result = self.finish_command(result.unwrap());
+                if let Err(e) = result {
+                    self.cleanup();
+                    self.status.build_finished();
+                    return Err(e);
+                }
+
+                let result = result.unwrap();
+                if !result.is_success() {
+                    if failures_allowed > 0 {
+                        failures_allowed -= 1;
+                    }
+                }
+
+                // We made some progress; start the main loop over.
+                continue;
+            }
+
+            // If we get here, we cannot make any more progress.
+            self.status.build_finished();
+            return match failures_allowed {
+              0 if config.failures_allowed > 1 => Err("subcommands failed".to_owned()),
+              0 => Err("subcommand failed".to_owned()),
+              _ if failures_allowed < self.config.failures_allowed => 
+                  Err("cannot make progress due to previous errors".to_owned()),
+              _ => Err("stuck [this is a bug]".to_owned()),
+            };
         }
 
-        if (edge->is_phony()) {
-          plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-        } else {
-          ++pending_commands;
-        }
-
-        // We made some progress; go back to the main loop.
-        continue;
-      }
+        self.status.build_finished();
+        return Ok(());
     }
 
-    // See if we can reap any finished commands.
-    if (pending_commands) {
-      CommandRunner::Result result;
-      if (!command_runner_->WaitForCommand(&result) ||
-          result.status == ExitInterrupted) {
-        Cleanup();
-        status_->BuildFinished();
-        *err = "interrupted by user";
-        return false;
-      }
-
-      --pending_commands;
-      if (!FinishCommand(&result, err)) {
-        Cleanup();
-        status_->BuildFinished();
-        return false;
-      }
-
-      if (!result.success()) {
-        if (failures_allowed)
-          failures_allowed--;
-      }
-
-      // We made some progress; start the main loop over.
-      continue;
-    }
-
-    // If we get here, we cannot make any more progress.
-    status_->BuildFinished();
-    if (failures_allowed == 0) {
-      if (config_.failures_allowed > 1)
-        *err = "subcommands failed";
-      else
-        *err = "subcommand failed";
-    } else if (failures_allowed < config_.failures_allowed)
-      *err = "cannot make progress due to previous errors";
-    else
-      *err = "stuck [this is a bug]";
-
-    return false;
-  }
-
-  status_->BuildFinished();
-  return true;
-*/
-
+    fn start_edge(&mut self, edge_idx: EdgeIndex) -> Result<(), String> {
         unimplemented!()
     }
 
+    /// Update status ninja logs following a command termination.
+    /// @return false if the build can not proceed further due to a fatal error.
+    fn finish_command(&mut self, result: CommandRunnerResult) -> Result<CommandRunnerResult, String> {
+        unimplemented!()
+    }
+
+    /// Clean up after interrupted commands by deleting output files.
+    pub fn cleanup(&mut self) {
+        if self.command_runner.is_none() {
+            return;
+        }
+        let command_runner = self.command_runner.as_mut().unwrap();
+        
+        let active_edges = command_runner.get_active_edges();
+        command_runner.abort();
+        for edge_idx in active_edges.into_iter() {
+            let edge = self.state.edge_state.get_edge(edge_idx);
+            let depfile = edge.get_unescaped_depfile(&self.state.node_state).into_owned();
+            for out_idx in edge.outputs.iter() {
+                // Only delete this output if it was actually modified.  This is
+                // important for things like the generator where we don't want to
+                // delete the manifest file if we can avoid it.  But if the rule
+                // uses a depfile, always delete.  (Consider the case where we
+                // need to rebuild an output because of a modified header file
+                // mentioned in a depfile, and the command touches its depfile
+                // but is interrupted before it touches its output file.)
+                let out_node = self.state.node_state.get_node(*out_idx);
+                match pathbuf_from_bytes(out_node.path().to_owned()) {
+                  Err(e) => {error!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e));},
+                  Ok(path) => {
+                      match self.disk_interface.stat(&path) {
+                          Err(e) => {error!("{}", e);}
+                          Ok(new_mtime) => {
+                              if !depfile.is_empty() || out_node.mtime() != new_mtime {
+                                  let _ = self.disk_interface.remove_file(&path);
+                              }
+                          }
+                      }
+                  }
+                }
+            }
+            if !depfile.is_empty() {
+                match pathbuf_from_bytes(depfile) {
+                  Err(e) => {error!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e));},
+                  Ok(path) => { let _ = self.disk_interface.remove_file(&path); },
+                };
+            }
+        }
+    }
+}
+
+impl<'s, 'p, 'a, 'b, 'c> Drop for Builder<'s, 'p, 'a, 'b, 'c> {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
 }
 
 /*
@@ -528,11 +563,7 @@ struct Builder {
   Node* AddTarget(const string& name, string* err);
 
 
-  bool StartEdge(Edge* edge, string* err);
 
-  /// Update status ninja logs following a command termination.
-  /// @return false if the build can not proceed further due to a fatal error.
-  bool FinishCommand(CommandRunner::Result* result, string* err);
 
   /// Used for tests.
   void SetBuildLog(BuildLog* log) {
@@ -563,6 +594,12 @@ struct BuildStatus<'a> {
     config: &'a BuildConfig,
 
     total_edges: Cell<usize>,
+
+    /// Prints progress output.
+    printer: LinePrinter,
+
+    overall_rate: RefCell<RateInfo>,
+    current_rate: RefCell<SlidingRateInfo>,
 }
 
 impl<'a> BuildStatus<'a> {
@@ -571,19 +608,25 @@ impl<'a> BuildStatus<'a> {
             config,
 
             total_edges: Cell::new(0),
+            printer: LinePrinter::new(),
+
+            overall_rate: RefCell::new(RateInfo::new()),
+            current_rate: RefCell::new(SlidingRateInfo::new(config.parallelism)),
         }
     }
 
-    pub fn plan_has_total_edges(&self, total: usize) {
+    pub fn plan_has_total_edges(&mut self, total: usize) {
         self.total_edges.set(total);
     }
 
-    pub fn build_started(&self) {
-        unimplemented!{}
+    pub fn build_started(&mut self) {
+        self.overall_rate.borrow_mut().restart();
+        self.current_rate.borrow_mut().restart();
     }
 
-    pub fn build_finished(&self) {
-        unimplemented!{}
+    pub fn build_finished(&mut self) {
+        self.printer.set_console_locked(false);
+        self.printer.print_on_new_line(b"");
     }
 }
 /*
@@ -674,6 +717,33 @@ impl RateInfo {
     Stopwatch stopwatch_;
   };
 
+  */
+
+struct SlidingRateInfo {
+    rate: f64,
+    stopwatch: Stopwatch,
+    max_len: usize,
+    times: VecDeque<f64>,
+    last_update: isize,
+}
+
+impl SlidingRateInfo {
+    pub fn new(n: usize) -> Self {
+        SlidingRateInfo {
+            rate: -1.0f64,
+            stopwatch: Stopwatch::new(),
+            max_len: n,
+            times: VecDeque::new(),
+            last_update: -1,
+        }
+    }
+
+    pub fn restart(&mut self) {
+        self.stopwatch.restart();
+    }
+}
+
+/*
   struct SlidingRateInfo {
     SlidingRateInfo(int n) : rate_(-1), N(n), last_update_(-1) {}
 
@@ -785,6 +855,14 @@ impl CommandRunner for DryRunCommandRunner {
                 output: String::new(),
             })
         }
+    }
+
+    fn get_active_edges(&self) -> Vec<EdgeIndex>  {
+        unimplemented!{}
+    }
+
+    fn abort(&mut self) {
+        unimplemented!{}
     }
 }
 /*
@@ -1068,19 +1146,34 @@ void Plan::Dump() {
 
 struct RealCommandRunner<'a> {
     config: &'a BuildConfig,
+    subprocs: SubprocessSet<EdgeIndex>,
 }
 
 impl<'a> RealCommandRunner<'a> {
     pub fn new(config: &'a BuildConfig) -> Self {
         RealCommandRunner {
             config,
+            subprocs: SubprocessSet::new(),
         }
     }
 }
 
 impl<'a> CommandRunner for RealCommandRunner<'a> {
     fn can_run_more(&self) -> bool {
-        unimplemented!{}
+        let subproc_number = self.subprocs.running().len() + self.subprocs.finished().len();
+        if subproc_number >= self.config.parallelism {
+            return false;
+        }
+        if self.subprocs.running().is_empty() {
+            return true;
+        }
+        if self.config.max_load_average <= 0.0f64 {
+            return true;
+        }
+        if get_load_average().unwrap_or(-0.0f64) < self.config.max_load_average {
+            return true;
+        }
+        return false;
     }
     
     fn start_command(&mut self, edge: EdgeIndex) -> bool {
@@ -1089,6 +1182,14 @@ impl<'a> CommandRunner for RealCommandRunner<'a> {
 
     fn wait_for_command(&mut self) -> Option<CommandRunnerResult> {
         unimplemented!{}
+    }
+
+    fn get_active_edges(&self) -> Vec<EdgeIndex> {
+        self.subprocs.iter().map(|x| x.1).collect()
+    }
+
+    fn abort(&mut self) {
+        self.subprocs.clear();
     }
 }
 
@@ -1106,18 +1207,6 @@ struct RealCommandRunner : public CommandRunner {
   SubprocessSet subprocs_;
   map<Subprocess*, Edge*> subproc_to_edge_;
 };
-
-vector<Edge*> RealCommandRunner::GetActiveEdges() {
-  vector<Edge*> edges;
-  for (map<Subprocess*, Edge*>::iterator e = subproc_to_edge_.begin();
-       e != subproc_to_edge_.end(); ++e)
-    edges.push_back(e->second);
-  return edges;
-}
-
-void RealCommandRunner::Abort() {
-  subprocs_.Clear();
-}
 
 bool RealCommandRunner::CanRunMore() {
   size_t subproc_number =
@@ -1168,35 +1257,6 @@ Builder::~Builder() {
   Cleanup();
 }
 
-void Builder::Cleanup() {
-  if (command_runner_.get()) {
-    vector<Edge*> active_edges = command_runner_->GetActiveEdges();
-    command_runner_->Abort();
-
-    for (vector<Edge*>::iterator e = active_edges.begin();
-         e != active_edges.end(); ++e) {
-      string depfile = (*e)->GetUnescapedDepfile();
-      for (vector<Node*>::iterator o = (*e)->outputs_.begin();
-           o != (*e)->outputs_.end(); ++o) {
-        // Only delete this output if it was actually modified.  This is
-        // important for things like the generator where we don't want to
-        // delete the manifest file if we can avoid it.  But if the rule
-        // uses a depfile, always delete.  (Consider the case where we
-        // need to rebuild an output because of a modified header file
-        // mentioned in a depfile, and the command touches its depfile
-        // but is interrupted before it touches its output file.)
-        string err;
-        TimeStamp new_mtime = disk_interface_->Stat((*o)->path(), &err);
-        if (new_mtime == -1)  // Log and ignore Stat() errors.
-          Error("%s", err.c_str());
-        if (!depfile.empty() || (*o)->mtime() != new_mtime)
-          disk_interface_->RemoveFile((*o)->path());
-      }
-      if (!depfile.empty())
-        disk_interface_->RemoveFile(depfile);
-    }
-  }
-}
 
 Node* Builder::AddTarget(const string& name, string* err) {
   Node* node = state_->LookupNode(name);
@@ -1224,95 +1284,6 @@ bool Builder::AddTarget(Node* node, string* err) {
   return true;
 }
 
-bool Builder::Build(string* err) {
-  assert(!AlreadyUpToDate());
-
-  status_->PlanHasTotalEdges(plan_.command_edge_count());
-  int pending_commands = 0;
-  int failures_allowed = config_.failures_allowed;
-
-  // Set up the command runner if we haven't done so already.
-  if (!command_runner_.get()) {
-    if (config_.dry_run)
-      command_runner_.reset(new DryRunCommandRunner);
-    else
-      command_runner_.reset(new RealCommandRunner(config_));
-  }
-
-  // We are about to start the build process.
-  status_->BuildStarted();
-
-  // This main loop runs the entire build process.
-  // It is structured like this:
-  // First, we attempt to start as many commands as allowed by the
-  // command runner.
-  // Second, we attempt to wait for / reap the next finished command.
-  while (plan_.more_to_do()) {
-    // See if we can start any more commands.
-    if (failures_allowed && command_runner_->CanRunMore()) {
-      if (Edge* edge = plan_.FindWork()) {
-        if (!StartEdge(edge, err)) {
-          Cleanup();
-          status_->BuildFinished();
-          return false;
-        }
-
-        if (edge->is_phony()) {
-          plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-        } else {
-          ++pending_commands;
-        }
-
-        // We made some progress; go back to the main loop.
-        continue;
-      }
-    }
-
-    // See if we can reap any finished commands.
-    if (pending_commands) {
-      CommandRunner::Result result;
-      if (!command_runner_->WaitForCommand(&result) ||
-          result.status == ExitInterrupted) {
-        Cleanup();
-        status_->BuildFinished();
-        *err = "interrupted by user";
-        return false;
-      }
-
-      --pending_commands;
-      if (!FinishCommand(&result, err)) {
-        Cleanup();
-        status_->BuildFinished();
-        return false;
-      }
-
-      if (!result.success()) {
-        if (failures_allowed)
-          failures_allowed--;
-      }
-
-      // We made some progress; start the main loop over.
-      continue;
-    }
-
-    // If we get here, we cannot make any more progress.
-    status_->BuildFinished();
-    if (failures_allowed == 0) {
-      if (config_.failures_allowed > 1)
-        *err = "subcommands failed";
-      else
-        *err = "subcommand failed";
-    } else if (failures_allowed < config_.failures_allowed)
-      *err = "cannot make progress due to previous errors";
-    else
-      *err = "stuck [this is a bug]";
-
-    return false;
-  }
-
-  status_->BuildFinished();
-  return true;
-}
 
 bool Builder::StartEdge(Edge* edge, string* err) {
   METRIC_RECORD("StartEdge");

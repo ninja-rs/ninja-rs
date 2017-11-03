@@ -182,6 +182,9 @@ impl DiskInterface for VirtualFileSystem {
     fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
         unimplemented!()
     }
+    fn remove_file(&self, path: &Path) -> Result<bool, io::Error> {
+        unimplemented!()
+    }
 }
 
 
