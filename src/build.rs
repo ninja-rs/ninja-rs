@@ -22,9 +22,10 @@ use super::disk_interface::DiskInterface;
 use super::graph::{NodeIndex, EdgeIndex, DependencyScan};
 use super::exit_status::ExitStatus;
 use super::metrics::Stopwatch;
+use super::metrics::get_time_millis;
 use super::subprocess::SubprocessSet;
 use super::utils::{get_load_average, pathbuf_from_bytes};
-use super::line_printer::LinePrinter;
+use super::line_printer::{LinePrinter, LinePrinterLineType};
 
 pub enum EdgeResult {
   EdgeFailed,
@@ -294,7 +295,7 @@ impl CommandRunnerResult {
 
 pub trait CommandRunner {
     fn can_run_more(&self) -> bool;
-    fn start_command(&mut self, edge: EdgeIndex) -> bool;
+    fn start_command(&mut self, state: &State, edge: EdgeIndex) -> bool;
     /// Wait for a command to complete, or return false if interrupted.
     fn wait_for_command(&mut self) -> Option<CommandRunnerResult>;
     fn get_active_edges(&self) -> Vec<EdgeIndex>;
@@ -490,7 +491,41 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
     }
 
     fn start_edge(&mut self, edge_idx: EdgeIndex) -> Result<(), String> {
-        unimplemented!()
+        metric_record!("StartEdge");
+        let edge = self.state.edge_state.get_edge(edge_idx);
+        if edge.is_phony() {
+            return Ok(());
+        }
+
+        self.status.build_edge_started(self.state, edge_idx);
+
+        // Create directories necessary for outputs.
+        // XXX: this will block; do we care?
+        for out_idx in edge.outputs.iter() {
+            let path = pathbuf_from_bytes(self.state.node_state.get_node(*out_idx).path().to_owned())
+                .map_err(|e| format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e)))?;
+            if let Some(parent) = path.parent() {
+                self.disk_interface.make_dirs(parent).map_err(|e| format!("{}", e))?;
+            }
+        }
+
+        // Create response file, if needed
+        // XXX: this may also block; do we care?
+        let rspfile = edge.get_unescaped_rspfile(&self.state.node_state);
+        if !rspfile.as_ref().is_empty() {
+            let content = edge.get_binding(&self.state.node_state, b"rspfile_content");
+            let rspfile_path = pathbuf_from_bytes(rspfile.into_owned()).map_err(|e| {
+              format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e))
+            })?;
+            self.disk_interface.write_file(&rspfile_path, content.as_ref()).map_err(|_| String::new())?;
+        }
+
+        // start command computing and run it
+        if !self.command_runner.as_mut().unwrap().start_command(self.state, edge_idx) {
+            return Err(format!("command '{}' failed.", String::from_utf8_lossy(&edge.evaluate_command(&self.state.node_state))));
+        }
+
+        Ok(())
     }
 
     /// Update status ninja logs following a command termination.
@@ -589,14 +624,30 @@ struct Builder {
   void operator=(const Builder &other); // DO NOT IMPLEMENT
 };
 */
+
+enum BuildStatusEdgeStatus {
+  EdgeStarted,
+  EdgeFinished,
+}
+
 /// Tracks the status of a build: completion fraction, printing updates.
 struct BuildStatus<'a> {
     config: &'a BuildConfig,
 
-    total_edges: Cell<usize>,
+    /// Time the build started.
+    start_time_millis: u64,
+
+    started_edges: usize,
+    running_edges: BTreeMap<EdgeIndex, u64>, /// Map of running edge to time the edge started running.
+    finished_edges: usize,
+    total_edges: usize,
+
+    /// The custom progress status format to use.
+    progress_status_format: Vec<u8>,
 
     /// Prints progress output.
     printer: LinePrinter,
+
 
     overall_rate: RefCell<RateInfo>,
     current_rate: RefCell<SlidingRateInfo>,
@@ -604,19 +655,28 @@ struct BuildStatus<'a> {
 
 impl<'a> BuildStatus<'a> {
     pub fn new(config: &'a BuildConfig) -> Self {
-        BuildStatus {
+        let v = BuildStatus {
             config,
 
-            total_edges: Cell::new(0),
+            start_time_millis: get_time_millis(),
+
+            started_edges: 0,
+            running_edges: BTreeMap::new(),
+            finished_edges: 0,
+            total_edges: 0,
+
+            progress_status_format: Vec::new(),  // TODO
             printer: LinePrinter::new(),
 
             overall_rate: RefCell::new(RateInfo::new()),
             current_rate: RefCell::new(SlidingRateInfo::new(config.parallelism)),
-        }
+        };
+        return v;
+        unimplemented!{}
     }
 
     pub fn plan_has_total_edges(&mut self, total: usize) {
-        self.total_edges.set(total);
+        self.total_edges = total;
     }
 
     pub fn build_started(&mut self) {
@@ -627,6 +687,51 @@ impl<'a> BuildStatus<'a> {
     pub fn build_finished(&mut self) {
         self.printer.set_console_locked(false);
         self.printer.print_on_new_line(b"");
+    }
+
+    pub fn build_edge_started(&mut self, state: &State, edge_idx: EdgeIndex) {
+        let start_time = get_time_millis() - self.start_time_millis;
+        self.running_edges.insert(edge_idx, start_time);
+        self.started_edges += 1;
+
+        let edge_use_console = state.edge_state.get_edge(edge_idx).use_console();
+        if edge_use_console || self.printer.is_smart_terminal() {
+            self.print_status(state, edge_idx, BuildStatusEdgeStatus::EdgeStarted);
+        }
+
+        if edge_use_console {
+            self.printer.set_console_locked(true);
+        }
+    }
+
+
+    /// Format the progress status string by replacing the placeholders.
+    /// See the user manual for more information about the available
+    /// placeholders.
+    /// @param progress_status_format The format of the progress status.
+    /// @param status The status of the edge.
+    pub fn format_progress_status(progress_status_format: &[u8], status: BuildStatusEdgeStatus) -> Vec<u8> {
+        return Vec::new();
+        unimplemented!()
+    }
+
+    fn print_status(&self, state: &State, edge_idx: EdgeIndex, status: BuildStatusEdgeStatus) {
+        let force_full_command = match self.config.verbosity {
+            BuildConfigVerbosity::QUIET => {return;},
+            BuildConfigVerbosity::VERBOSE => true,
+            BuildConfigVerbosity::NORMAL => false,
+        };
+
+        let edge = state.edge_state.get_edge(edge_idx);
+        let mut desc_or_cmd = edge.get_binding(&state.node_state, b"description");
+        if desc_or_cmd.is_empty() || force_full_command {
+            desc_or_cmd = edge.get_binding(&state.node_state, b"command");
+        }
+
+        let mut to_print = Self::format_progress_status(&self.progress_status_format, status);
+        to_print.extend_from_slice(&desc_or_cmd);
+        let ty = if force_full_command { LinePrinterLineType::Full } else { LinePrinterLineType::Elide };
+        self.printer.print(&to_print, ty);
     }
 }
 /*
@@ -639,38 +744,12 @@ struct BuildStatus {
   void BuildStarted();
   void BuildFinished();
 
-  enum EdgeStatus {
-    kEdgeStarted,
-    kEdgeFinished,
-  };
 
-  /// Format the progress status string by replacing the placeholders.
-  /// See the user manual for more information about the available
-  /// placeholders.
-  /// @param progress_status_format The format of the progress status.
-  /// @param status The status of the edge.
-  string FormatProgressStatus(const char* progress_status_format,
-                              EdgeStatus status) const;
 
  private:
   void PrintStatus(Edge* edge, EdgeStatus status);
 
-  const BuildConfig& config_;
 
-  /// Time the build started.
-  int64_t start_time_millis_;
-
-  int started_edges_, finished_edges_, total_edges_;
-
-  /// Map of running edge to time the edge started running.
-  typedef map<Edge*, int> RunningEdgeMap;
-  RunningEdgeMap running_edges_;
-
-  /// Prints progress output.
-  LinePrinter printer_;
-
-  /// The custom progress status format to use.
-  const char* progress_status_format_;
 
   template<size_t S>
   void SnprintfRate(double rate, char(&buf)[S], const char* format) const {
@@ -841,7 +920,7 @@ impl CommandRunner for DryRunCommandRunner {
         true
     }
 
-    fn start_command(&mut self, edge: EdgeIndex) -> bool {
+    fn start_command(&mut self, _: &State, edge: EdgeIndex) -> bool {
         self.finished.push_back(edge);
         true
     }
@@ -1176,8 +1255,11 @@ impl<'a> CommandRunner for RealCommandRunner<'a> {
         return false;
     }
     
-    fn start_command(&mut self, edge: EdgeIndex) -> bool {
-        unimplemented!{}
+    fn start_command(&mut self, state: &State, edge_idx: EdgeIndex) -> bool {
+        let edge = state.edge_state.get_edge(edge_idx);
+        let command = edge.evaluate_command(&state.node_state);
+
+        return self.subprocs.add(&command, edge.use_console(), edge_idx).is_some();
     }
 
     fn wait_for_command(&mut self) -> Option<CommandRunnerResult> {

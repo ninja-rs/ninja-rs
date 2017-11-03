@@ -48,6 +48,10 @@ pub trait DiskInterface: FileReader {
     /// other errors.
     fn stat(&self, path: &Path) -> Result<TimeStamp, String>;
 
+    /// Create a file, with the specified name and contents
+    /// Returns true on success, false on failure
+    fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), ()>;
+
     /// Remove the file named @a path. It behaves like 'rm -f path' so no errors
     /// are reported if it does not exists.
     /// @returns 0 if the file has been removed,
@@ -62,9 +66,6 @@ struct DiskInterface: public FileReader {
 
 
 
-  /// Create a file, with the specified name and contents
-  /// Returns true on success, false on failure
-  virtual bool WriteFile(const string& path, const string& contents) = 0;
 
 
 
@@ -172,6 +173,10 @@ impl DiskInterface for RealDiskInterface {
                 Err(format!("Stat({}): {}", path.display(), e))
             }
         })
+    }
+
+    fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), ()> {
+        unimplemented!()
     }
 
     fn remove_file(&self, path: &Path) -> Result<bool, io::Error> {

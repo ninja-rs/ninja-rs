@@ -12,22 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub enum LinePrinterLineType {
+  Full,
+  Elide,
+}
+
 /// Prints lines of text, possibly overprinting previously printed lines
 /// if the terminal supports it.
 pub struct LinePrinter {
-
+    smart_terminal: bool,
 }
 
 impl LinePrinter {
     pub fn new() -> Self {
-        LinePrinter {
-
-        }
+        let v = LinePrinter {
+            smart_terminal: false,
+        };
+        return v;
+        unimplemented!()
     }
 
+    pub fn is_smart_terminal(&self) -> bool { self.smart_terminal }
+    pub fn set_smart_terminal(&mut self, smart: bool) { self.smart_terminal = smart; }
+
+    /// Overprints the current line. If type is ELIDE, elides to_print to fit on
+    /// one line.
+    pub fn print(&self, to_print: &[u8], ty: LinePrinterLineType) {
+        return;
+        unimplemented!();
+    }
 
     /// Prints a string on a new line, not overprinting previous output.
-    pub fn print_on_new_line(&mut self, to_print: &[u8]) {
+    pub fn print_on_new_line(&self, to_print: &[u8]) {
         return;
         unimplemented!();
     }
@@ -48,10 +64,7 @@ struct LinePrinter {
   bool is_smart_terminal() const { return smart_terminal_; }
   void set_smart_terminal(bool smart) { smart_terminal_ = smart; }
 
-  enum LineType {
-    FULL,
-    ELIDE
-  };
+
   /// Overprints the current line. If type is ELIDE, elides to_print to fit on
   /// one line.
   void Print(string to_print, LineType type);
