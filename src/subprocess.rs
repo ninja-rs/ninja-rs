@@ -13,6 +13,9 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::cell::Cell;
+
+use super::exit_status::ExitStatus;
 
 /*
 
@@ -71,14 +74,42 @@ struct SubprocessOs {
 /// is true.
 pub struct Subprocess {
     use_console: bool,
+    buf: Vec<u8>,
     extra: Box<SubprocessOs>,
 }
 
 impl Subprocess {
-    pub(super) fn new(use_console: bool) -> Self {
-        Subprocess {
+
+    // always boxed to make sure pointer to self is not changed.
+    pub(super) fn new(use_console: bool) -> Box<Self> {
+        Box::new(Subprocess {
             use_console,
+            buf: Vec::new(),
             extra: Default::default(),
+        })
+    }
+
+    pub fn output(&self) -> &[u8] {
+        &self.buf
+    }    
+}
+
+#[cfg(windows)]
+impl Drop for Subprocess {
+    fn drop(&mut self) {
+        use winapi;
+        use errno;
+        use kernel32;
+
+        if !self.extra.pipe.is_null() {
+            if unsafe { kernel32::CloseHandle(self.extra.pipe) } == winapi::FALSE {
+                fatal!("CloseHandle: {}", errno::errno());
+            }
+        }
+
+        // Reap child if forgotten.
+        if self.exist() {
+            self.finish();
         }
     }
 }
@@ -90,7 +121,191 @@ impl Subprocess {
     }
 
     pub(super) fn start<T>(&mut self, set: &mut SubprocessSet<T>, command: &[u8]) -> bool {
-        unimplemented!()
+        use winapi;
+        use kernel32;
+        use std::ptr::null_mut;
+        use std::mem::{zeroed, size_of};
+
+        let child_pipe = self.setup_pipe(set.extra.ioport());
+
+        let mut security_attributes = unsafe { zeroed::<winapi::SECURITY_ATTRIBUTES>() };
+        security_attributes.nLength = size_of::<winapi::SECURITY_ATTRIBUTES>() as _;
+        security_attributes.bInheritHandle = winapi::TRUE;
+
+        let nul_name = wstrz!("NUL");
+
+        let nul = unsafe { kernel32::CreateFileW(nul_name.as_ptr(), 
+            winapi::GENERIC_READ,
+            winapi::FILE_SHARE_READ | winapi::FILE_SHARE_WRITE | winapi::FILE_SHARE_DELETE,
+            &mut security_attributes as _, winapi::OPEN_EXISTING, 0, null_mut()) };
+        
+        if nul == winapi::INVALID_HANDLE_VALUE {
+            fatal!("couldn't open nul");
+        }
+
+        let mut startup_info = unsafe { zeroed::<winapi::STARTUPINFOW>() };
+        startup_info.cb = size_of::<winapi::STARTUPINFOW>() as _;
+        if !self.use_console {
+            startup_info.dwFlags = winapi::STARTF_USESTDHANDLES;
+            startup_info.hStdInput = nul;
+            startup_info.hStdOutput = child_pipe;
+            startup_info.hStdError = child_pipe;
+        }
+
+        // In the console case, child_pipe is still inherited by the child and closed
+        // when the subprocess finishes, which then notifies ninja.
+        let mut process_info = unsafe { zeroed::<winapi::PROCESS_INFORMATION>() };
+
+        // Ninja handles ctrl-c, except for subprocesses in console pools.
+        let process_flags = if self.use_console { 0 } else { winapi::CREATE_NEW_PROCESS_GROUP };
+
+        // Do not prepend 'cmd /c' on Windows, this breaks command
+        // lines greater than 8,191 chars.
+        let cmd_unicode = ::std::str::from_utf8(command);
+        let create_process_result = match &cmd_unicode {
+            &Err(_) => Err(None),
+            &Ok (ref cmd_unicode) => {
+                if let Ok(cmd) = ::widestring::WideCString::from_str(cmd_unicode) {
+                    let mut cmd = cmd.into_vec();
+                    unsafe {
+                        if kernel32::CreateProcessW(null_mut(), cmd.as_mut_ptr(), null_mut(), null_mut(),
+                            winapi::TRUE, process_flags, null_mut(), null_mut(), &mut startup_info as _, &mut process_info as _) != winapi::FALSE {
+                                Ok(())
+                            } else {
+                                Err(Some(unsafe {kernel32::GetLastError()}))
+                            }
+                    }
+                } else {
+                    Err(None)
+                }
+            }
+        };
+
+        if !child_pipe.is_null() {
+            unsafe { kernel32::CloseHandle(child_pipe) };
+        }
+
+        unsafe { kernel32::CloseHandle(nul) };
+
+        match create_process_result {
+            Ok(()) => {
+                unsafe { kernel32::CloseHandle(process_info.hThread) };
+                self.extra.child = process_info.hProcess;
+                true
+            },
+            Err(e @ Some(winapi::ERROR_FILE_NOT_FOUND)) | Err(e @ None) => {
+                // File (program) not found error is treated as a normal build
+                // action failure.
+                unsafe { kernel32::CloseHandle(self.extra.pipe) };
+                self.extra.pipe = null_mut();
+                // child_ is already NULL;
+                self.buf = if e.is_some() {
+                    b"CreateProcess failed: The system cannot find the file specified.\n".as_ref().to_owned()
+                } else {
+                    b"CreateProcess failed: The command is not valid UTF-8 string.\n".as_ref().to_owned()
+                };
+                true
+            }
+            Err(Some(e)) => {
+                fatal!("CreateProcess : {}", ::errno::Errno(e as _))
+            },
+        }
+    }
+
+
+    /// Set up pipe_ as the parent-side pipe of the subprocess; return the
+    /// other end of the pipe, usable in the child process.
+    fn setup_pipe(&mut self, ioport: ::winapi::HANDLE) -> ::winapi::HANDLE {
+        use winapi;
+        use kernel32;
+        use errno;
+        use std::mem::zeroed;
+        use std::ptr::null_mut;
+        use widestring::WideCString;
+        let pipe_name = format!("\\\\.\\pipe\\ninja_pid{}_sp{:p}", 
+            unsafe { kernel32::GetCurrentProcessId() },
+            self);
+
+        let pipe_name = WideCString::from_str(pipe_name).unwrap().into_vec();
+
+        self.extra.pipe = unsafe {
+          kernel32::CreateNamedPipeW(
+            pipe_name.as_ptr(),
+            winapi::PIPE_ACCESS_INBOUND | winapi::FILE_FLAG_OVERLAPPED,
+            winapi::PIPE_TYPE_BYTE,
+            winapi::PIPE_UNLIMITED_INSTANCES,
+            0, 0, winapi::INFINITE, null_mut())
+        };
+
+        if self.extra.pipe == winapi::INVALID_HANDLE_VALUE {
+            fatal!("CreateNamedPipe : {}", errno::errno());
+        }
+
+        let create_port_result = unsafe {
+            kernel32::CreateIoCompletionPort(self.extra.pipe, ioport, self as * mut _ as usize as _, 0)
+        };
+        if create_port_result.is_null() {
+            fatal!("CreateIoCompletionPort : {}", errno::errno());
+        }
+
+        self.extra.overlapped = unsafe { zeroed() };
+        if unsafe {
+            kernel32::ConnectNamedPipe(self.extra.pipe, &mut self.extra.overlapped as _ )
+        } == winapi::FALSE && unsafe { kernel32::GetLastError() } != winapi::ERROR_IO_PENDING {
+            fatal!("ConnectNamedPipe : {}", errno::errno());
+        }
+
+        // Get the write end of the pipe as a handle inheritable across processes.
+        let output_write_handle = unsafe { 
+          kernel32::CreateFileW(pipe_name.as_ptr(), winapi::GENERIC_WRITE, 0, null_mut(), 
+                                winapi::OPEN_EXISTING, 0, null_mut())
+        };
+        let mut output_write_child = null_mut();
+        if unsafe { kernel32::DuplicateHandle(
+            kernel32::GetCurrentProcess(), output_write_handle,
+            kernel32::GetCurrentProcess(), &mut output_write_child as _,
+            0, winapi::TRUE, winapi::DUPLICATE_SAME_ACCESS) } == winapi::FALSE {
+            
+            fatal!("DuplicateHandle : {}", errno::errno());
+        }
+
+        unsafe {
+            kernel32::CloseHandle(output_write_handle);
+        }
+
+        output_write_child
+    }
+
+    /// Returns ExitSuccess on successful process exit, ExitInterrupted if
+    /// the process was interrupted, ExitFailure if it otherwise failed.
+    pub fn finish(&mut self) -> ExitStatus {
+        use winapi;
+        use kernel32;
+
+        if !self.exist() {
+            return ExitStatus::ExitFailure;
+        }
+
+        // TODO: add error handling for all of these.
+        unsafe {
+            kernel32::WaitForSingleObject(self.extra.child, winapi::INFINITE);
+        }
+
+        let mut exit_code = 0 as winapi::DWORD;
+        unsafe { kernel32::GetExitCodeProcess(self.extra.child, &mut exit_code as _) };
+        unsafe { kernel32::CloseHandle(self.extra.child) };
+
+        self.extra.child = ::std::ptr::null_mut();
+
+        match exit_code as _ {
+          0 => ExitStatus::ExitSuccess,
+          winapi::STATUS_CONTROL_C_EXIT => ExitStatus::ExitInterrupted,
+          _ => ExitStatus::ExitFailure,
+        }
+    }
+    
+    fn done(&self) -> bool {
+        self.extra.pipe.is_null()
     }
 }
 
@@ -102,6 +317,10 @@ impl Subprocess {
 
     pub(super) fn start<T>(&mut self, set: &mut SubprocessSet<T>, command: &[u8]) -> bool {
         unimplemented!()
+    }
+
+    fn done(&self) -> bool {
+        self.extra.fd.is_none()
     }
 }
 
@@ -125,9 +344,6 @@ struct Subprocess {
   string buf_;
 
 #ifdef _WIN32
-  /// Set up pipe_ as the parent-side pipe of the subprocess; return the
-  /// other end of the pipe, usable in the child process.
-  HANDLE SetupPipe(HANDLE ioport);
 
   HANDLE child_;
   HANDLE pipe_;
@@ -143,36 +359,71 @@ struct Subprocess {
   friend struct SubprocessSet;
 };
 */
+
+#[cfg(windows)]
+struct SubprocessSetOs {
+
+}
+
+#[cfg(windows)]
+thread_local! {
+    static IOPORT : ::std::cell::Cell<::winapi::HANDLE> = ::std::cell::Cell::new(::std::ptr::null_mut());
+}
+
+#[cfg(windows)]
+impl SubprocessSetOs {
+    pub fn new() -> Self {
+        SubprocessSetOs{}
+    }
+
+    pub fn ioport(&self) -> ::winapi::HANDLE {
+        IOPORT.with(|p| p.get())
+    }
+
+    pub fn set_ioport(&self, ioport: ::winapi::HANDLE) {
+        IOPORT.with(|p| p.set(ioport))
+    }
+}
+
+
+#[cfg(unix)]
+struct SubprocessSetOs {
+
+}
+
+
 /// SubprocessSet runs a ppoll/pselect() loop around a set of Subprocesses.
 /// DoWork() waits for any state change in subprocesses; finished_
 /// is a queue of subprocesses as they finish.
 pub struct SubprocessSet<Data = ()> {
-    running: Vec<(Subprocess, Data)>,
-    finished: VecDeque<(Subprocess, Data)>,
+    running: Vec<(Box<Subprocess>, Data)>,
+    finished: VecDeque<(Box<Subprocess>, Data)>,
+    extra: SubprocessSetOs,
 }
 
 type Iter<'a, Data> = ::std::iter::Chain<
-    ::std::collections::vec_deque::Iter<'a, (Subprocess, Data)>,
-    ::std::slice::Iter<'a, (Subprocess, Data)>>;
+    ::std::collections::vec_deque::Iter<'a, (Box<Subprocess>, Data)>,
+    ::std::slice::Iter<'a, (Box<Subprocess>, Data)>>;
 
 impl<Data> SubprocessSet<Data> {
     pub fn new() -> Self {
         SubprocessSet {
             running: Vec::new(),
             finished: VecDeque::new(),
+            extra: SubprocessSetOs::new(),
         }
     }
 
-    pub fn running(&self) -> &Vec<(Subprocess,Data)> {
+    pub fn running(&self) -> &Vec<(Box<Subprocess>,Data)> {
         &self.running
     }
 
-    pub fn finished(&self) -> &VecDeque<(Subprocess,Data)> {
+    pub fn finished(&self) -> &VecDeque<(Box<Subprocess>,Data)> {
         &self.finished
     }
 
     pub fn add(&mut self, command: &[u8], use_console: bool, data: Data) 
-        -> Option<&mut(Subprocess, Data)> {
+        -> Option<&mut(Box<Subprocess>, Data)> {
             
         let mut subprocess = Subprocess::new(use_console);
         if !subprocess.start(self, command) {
@@ -186,6 +437,15 @@ impl<Data> SubprocessSet<Data> {
             self.finished.push_back((subprocess, data));
             return self.finished.back_mut();
         }
+    }
+
+    // return Err(()) if interrupted.
+    pub fn do_work(&mut self) -> Result<(), ()> {
+        unimplemented!()
+    }
+
+    pub fn next_finished(&mut self) -> Option<(Box<Subprocess>, Data)> {
+        self.finished.pop_front()
     }
 
     pub fn iter<'a>(&'a self) -> Iter<'a, Data> {
@@ -312,73 +572,6 @@ HANDLE Subprocess::SetupPipe(HANDLE ioport) {
   return output_write_child;
 }
 
-bool Subprocess::Start(SubprocessSet* set, const string& command) {
-  HANDLE child_pipe = SetupPipe(set->ioport_);
-
-  SECURITY_ATTRIBUTES security_attributes;
-  memset(&security_attributes, 0, sizeof(SECURITY_ATTRIBUTES));
-  security_attributes.nLength = sizeof(SECURITY_ATTRIBUTES);
-  security_attributes.bInheritHandle = TRUE;
-  // Must be inheritable so subprocesses can dup to children.
-  HANDLE nul = CreateFile("NUL", GENERIC_READ,
-          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-          &security_attributes, OPEN_EXISTING, 0, NULL);
-  if (nul == INVALID_HANDLE_VALUE)
-    Fatal("couldn't open nul");
-
-  STARTUPINFOA startup_info;
-  memset(&startup_info, 0, sizeof(startup_info));
-  startup_info.cb = sizeof(STARTUPINFO);
-  if (!use_console_) {
-    startup_info.dwFlags = STARTF_USESTDHANDLES;
-    startup_info.hStdInput = nul;
-    startup_info.hStdOutput = child_pipe;
-    startup_info.hStdError = child_pipe;
-  }
-  // In the console case, child_pipe is still inherited by the child and closed
-  // when the subprocess finishes, which then notifies ninja.
-
-  PROCESS_INFORMATION process_info;
-  memset(&process_info, 0, sizeof(process_info));
-
-  // Ninja handles ctrl-c, except for subprocesses in console pools.
-  DWORD process_flags = use_console_ ? 0 : CREATE_NEW_PROCESS_GROUP;
-
-  // Do not prepend 'cmd /c' on Windows, this breaks command
-  // lines greater than 8,191 chars.
-  if (!CreateProcessA(NULL, (char*)command.c_str(), NULL, NULL,
-                      /* inherit handles */ TRUE, process_flags,
-                      NULL, NULL,
-                      &startup_info, &process_info)) {
-    DWORD error = GetLastError();
-    if (error == ERROR_FILE_NOT_FOUND) {
-      // File (program) not found error is treated as a normal build
-      // action failure.
-      if (child_pipe)
-        CloseHandle(child_pipe);
-      CloseHandle(pipe_);
-      CloseHandle(nul);
-      pipe_ = NULL;
-      // child_ is already NULL;
-      buf_ = "CreateProcess failed: The system cannot find the file "
-          "specified.\n";
-      return true;
-    } else {
-      Win32Fatal("CreateProcess");    // pass all other errors to Win32Fatal
-    }
-  }
-
-  // Close pipe channel only used by the child.
-  if (child_pipe)
-    CloseHandle(child_pipe);
-  CloseHandle(nul);
-
-  CloseHandle(process_info.hThread);
-  child_ = process_info.hProcess;
-
-  return true;
-}
-
 void Subprocess::OnPipeReady() {
   DWORD bytes;
   if (!GetOverlappedResult(pipe_, &overlapped_, &bytes, TRUE)) {
@@ -428,13 +621,6 @@ ExitStatus Subprocess::Finish() {
                                        ExitFailure;
 }
 
-bool Subprocess::Done() const {
-  return pipe_ == NULL;
-}
-
-const string& Subprocess::GetOutput() const {
-  return buf_;
-}
 
 HANDLE SubprocessSet::ioport_;
 
@@ -503,14 +689,6 @@ bool SubprocessSet::DoWork() {
   }
 
   return false;
-}
-
-Subprocess* SubprocessSet::NextFinished() {
-  if (finished_.empty())
-    return NULL;
-  Subprocess* subproc = finished_.front();
-  finished_.pop();
-  return subproc;
 }
 
 void SubprocessSet::Clear() {

@@ -281,7 +281,7 @@ private:
 pub struct CommandRunnerResult {
     pub edge: EdgeIndex,
     pub status: ExitStatus,
-    pub output: String,
+    pub output: Vec<u8>,
 }
 
 impl CommandRunnerResult {
@@ -931,7 +931,7 @@ impl CommandRunner for DryRunCommandRunner {
             Some(e) => Some(CommandRunnerResult {
                 edge: e,
                 status: ExitStatus::ExitSuccess,
-                output: String::new(),
+                output: Vec::new(),
             })
         }
     }
@@ -1263,7 +1263,23 @@ impl<'a> CommandRunner for RealCommandRunner<'a> {
     }
 
     fn wait_for_command(&mut self) -> Option<CommandRunnerResult> {
-        unimplemented!{}
+        let (mut subproc, edge_idx) = loop {
+            if let Some(next_finished) = self.subprocs.next_finished() {
+                break next_finished;
+            }
+            if self.subprocs.do_work().is_err() {
+                //interrupted
+                return None;
+            }
+        };
+
+        let status = subproc.finish();
+        let output = subproc.output().to_owned();
+        Some(CommandRunnerResult{
+            status,
+            output,
+            edge: edge_idx,
+        })
     }
 
     fn get_active_edges(&self) -> Vec<EdgeIndex> {

@@ -14,6 +14,7 @@
 
 use std;
 use libc;
+use libc_stdhandle;
 use errno;
 use num_cpus;
 use std::path::PathBuf;
@@ -116,12 +117,10 @@ impl ZeroOrErrnoResult for libc::c_int {
     }
 }
 
+
 pub fn set_stdout_linebuffered() {
-    extern {
-        fn ninja_get_c_stdout() -> * mut libc::FILE;
-    }
     unsafe {
-        libc::setvbuf(ninja_get_c_stdout(), std::ptr::null_mut(), libc::_IOLBF, libc::BUFSIZ as _);
+        libc::setvbuf(libc_stdhandle::stdout(), std::ptr::null_mut(), libc::_IOLBF, libc::BUFSIZ as _);
     }
 }
 

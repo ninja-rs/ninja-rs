@@ -180,7 +180,14 @@ impl DiskInterface for RealDiskInterface {
     }
 
     fn remove_file(&self, path: &Path) -> Result<bool, io::Error> {
-        unimplemented!()
+        use std::fs::remove_file;
+
+        match remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(ref e) if e.kind() == ErrorKind::NotFound 
+                   => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 
