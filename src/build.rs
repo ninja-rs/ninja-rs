@@ -718,7 +718,73 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
     fn extract_deps(&self, result: &mut CommandRunnerResult, deps_type: &[u8], deps_prefix: &[u8])
         -> Result<Vec<NodeIndex>, String> {
-          unimplemented!{}
+          if deps_type == b"msvc" {
+/*
+    CLParser parser;
+    string output;
+    if (!parser.Parse(result->output, deps_prefix, &output, err))
+      return false;
+    result->output = output;
+    for (set<string>::iterator i = parser.includes_.begin();
+         i != parser.includes_.end(); ++i) {
+      // ~0 is assuming that with MSVC-parsed headers, it's ok to always make
+      // all backslashes (as some of the slashes will certainly be backslashes
+      // anyway). This could be fixed if necessary with some additional
+      // complexity in IncludesNormalize::Relativize.
+      deps_nodes->push_back(state_->GetNode(*i, ~0u));
+    }
+*/
+              return Ok(Vec::new());
+              unimplemented!{}
+          } else if deps_type == b"gcc" {
+/*
+    string depfile = result->edge->GetUnescapedDepfile();
+    if (depfile.empty()) {
+      *err = string("edge with deps=gcc but no depfile makes no sense");
+      return false;
+    }
+
+    // Read depfile content.  Treat a missing depfile as empty.
+    string content;
+    switch (disk_interface_->ReadFile(depfile, &content, err)) {
+    case DiskInterface::Okay:
+      break;
+    case DiskInterface::NotFound:
+      err->clear();
+      break;
+    case DiskInterface::OtherError:
+      return false;
+    }
+    if (content.empty())
+      return true;
+
+    DepfileParser deps;
+    if (!deps.Parse(&content, err))
+      return false;
+
+    // XXX check depfile matches expected output.
+    deps_nodes->reserve(deps.ins_.size());
+    for (vector<StringPiece>::iterator i = deps.ins_.begin();
+         i != deps.ins_.end(); ++i) {
+      uint64_t slash_bits;
+      if (!CanonicalizePath(const_cast<char*>(i->str_), &i->len_, &slash_bits,
+                            err))
+        return false;
+      deps_nodes->push_back(state_->GetNode(*i, slash_bits));
+    }
+
+    if (!g_keep_depfile) {
+      if (disk_interface_->RemoveFile(depfile) < 0) {
+        *err = string("deleting depfile: ") + strerror(errno) + string("\n");
+        return false;
+      }
+    }
+*/
+              unimplemented!{}
+          } else {
+              fatal!("unknown deps type '{}'", String::from_utf8_lossy(deps_type));
+              unreachable!();
+          }
     }
 }
 
@@ -790,7 +856,6 @@ struct BuildStatus<'a> {
 
     /// Prints progress output.
     printer: LinePrinter,
-
 
     overall_rate: RefCell<RateInfo>,
     current_rate: RefCell<SlidingRateInfo>,
@@ -1145,11 +1210,11 @@ impl CommandRunner for DryRunCommandRunner {
     }
 
     fn get_active_edges(&self) -> Vec<EdgeIndex>  {
-        unimplemented!{}
+        Vec::new()
     }
 
     fn abort(&mut self) {
-        unimplemented!{}
+        //do nothing
     }
 }
 /*
@@ -1559,11 +1624,6 @@ Builder::Builder(State* state, const BuildConfig& config,
   status_ = new BuildStatus(config);
 }
 
-Builder::~Builder() {
-  Cleanup();
-}
-
-
 Node* Builder::AddTarget(const string& name, string* err) {
   Node* node = state_->LookupNode(name);
   if (!node) {
@@ -1591,42 +1651,6 @@ bool Builder::AddTarget(Node* node, string* err) {
 }
 
 
-bool Builder::StartEdge(Edge* edge, string* err) {
-  METRIC_RECORD("StartEdge");
-  if (edge->is_phony())
-    return true;
-
-  status_->BuildEdgeStarted(edge);
-
-  // Create directories necessary for outputs.
-  // XXX: this will block; do we care?
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
-       o != edge->outputs_.end(); ++o) {
-    if (!disk_interface_->MakeDirs((*o)->path()))
-      return false;
-  }
-
-  // Create response file, if needed
-  // XXX: this may also block; do we care?
-  string rspfile = edge->GetUnescapedRspfile();
-  if (!rspfile.empty()) {
-    string content = edge->GetBinding("rspfile_content");
-    if (!disk_interface_->WriteFile(rspfile, content))
-      return false;
-  }
-
-  // start command computing and run it
-  if (!command_runner_->StartCommand(edge)) {
-    err->assign("command '" + edge->EvaluateCommand() + "' failed.");
-    return false;
-  }
-
-  return true;
-}
-
-bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
-
-}
 
 bool Builder::ExtractDeps(CommandRunner::Result* result,
                           const string& deps_type,

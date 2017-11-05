@@ -77,7 +77,8 @@ impl<'a> BuildLog<'a> {
     }
 
     /// Lookup a previously-run command by its output path.
-    pub fn lookup_by_output(&self, path: &str) -> Option<&BuildLogEntry> {
+    pub fn lookup_by_output(&self, path: &[u8]) -> Option<&BuildLogEntry> {
+        return None;
         unimplemented!{}
     }
 

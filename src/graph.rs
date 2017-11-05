@@ -669,8 +669,102 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
     /// Returns true if so.
     fn recompute_output_dirty(&self, state: &State, edge_idx: EdgeIndex, most_recent_input: Option<NodeIndex>,
         command: &[u8], output_node_idx: NodeIndex) -> bool {
-          return true;
-          unimplemented!()
+    
+        let edge = state.edge_state.get_edge(edge_idx);
+        let output = state.node_state.get_node(output_node_idx);
+        let mut entry = None;
+
+        if edge.is_phony() {
+            // Phony edges don't write any output.  Outputs are only dirty if
+            // there are no inputs and we're missing the output.
+            if edge.inputs.is_empty() && !output.exists() {
+                explain!("output {} of phony edge with no inputs doesn't exist",
+                    String::from_utf8_lossy(output.path()));
+                
+                return true;
+            }
+            return false;   
+        }
+
+        // Dirty if we're missing the output.
+        if !output.exists() {
+            explain!("output {} doesn't exist", String::from_utf8_lossy(output.path()));
+            return true;
+        }
+
+        // Dirty if the output is older than the input.
+        if let Some(ref most_recent_input_idx) = most_recent_input {
+            let most_recent_input = state.node_state.get_node(*most_recent_input_idx);
+            if output.mtime() < most_recent_input.mtime() {
+                let mut output_mtime = output.mtime();
+
+                // If this is a restat rule, we may have cleaned the output with a restat
+                // rule in a previous run and stored the most recent input mtime in the
+                // build log.  Use that mtime instead, so that the file will only be
+                // considered dirty if an input was modified since the previous run.
+                let mut used_restat = false;
+
+                if edge.get_binding_bool(&state.node_state, b"restat") {
+                    if let Some(build_log) = self.build_log() {
+                        if entry.is_none() {
+                            entry = build_log.lookup_by_output(output.path());
+                        }
+                        if let Some(found_entry) = entry {
+                            output_mtime = found_entry.mtime;
+                            used_restat = true;
+                        }
+                    }
+                }
+
+
+                if output_mtime < most_recent_input.mtime() {
+                    explain!("{}output {} older than most recent input {} ({} vs {})",
+                        if used_restat { "restat of " } else { "" },
+                        String::from_utf8_lossy(output.path()),
+                        String::from_utf8_lossy(most_recent_input.path()),
+                        output_mtime,
+                        most_recent_input.mtime);
+                    return true;
+                }
+            }
+        }
+
+        if let Some(build_log) = self.build_log() {
+            let generator = edge.get_binding_bool(&state.node_state, b"generator");
+            if entry.is_none() {
+                entry = build_log.lookup_by_output(output.path());
+            }
+            if let Some(found_entry) = entry {
+                unimplemented!()
+/*
+      if (!generator &&
+          BuildLog::LogEntry::HashCommand(command) != entry->command_hash) {
+        // May also be dirty due to the command changing since the last build.
+        // But if this is a generator rule, the command changing does not make us
+        // dirty.
+        EXPLAIN("command line changed for %s", output->path().c_str());
+        return true;
+      }
+      if (most_recent_input && entry->mtime < most_recent_input->mtime()) {
+        // May also be dirty due to the mtime in the log being older than the
+        // mtime of the most recent input.  This can occur even when the mtime
+        // on disk is newer if a previous run wrote to the output file but
+        // exited with an error or was interrupted.
+        EXPLAIN("recorded mtime of %s older than most recent input %s (%d vs %d)",
+                output->path().c_str(), most_recent_input->path().c_str(),
+                entry->mtime, most_recent_input->mtime());
+        return true;
+      }
+*/
+            }
+
+            if entry.is_none() && !generator {
+                explain!("command line not found in log for {}", String::from_utf8_lossy(output.path()));
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 
@@ -717,79 +811,6 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
                                           Node* most_recent_input,
                                           const string& command,
                                           Node* output) {
-  if (edge->is_phony()) {
-    // Phony edges don't write any output.  Outputs are only dirty if
-    // there are no inputs and we're missing the output.
-    if (edge->inputs_.empty() && !output->exists()) {
-      EXPLAIN("output %s of phony edge with no inputs doesn't exist",
-              output->path().c_str());
-      return true;
-    }
-    return false;
-  }
-
-  BuildLog::LogEntry* entry = 0;
-
-  // Dirty if we're missing the output.
-  if (!output->exists()) {
-    EXPLAIN("output %s doesn't exist", output->path().c_str());
-    return true;
-  }
-
-  // Dirty if the output is older than the input.
-  if (most_recent_input && output->mtime() < most_recent_input->mtime()) {
-    TimeStamp output_mtime = output->mtime();
-
-    // If this is a restat rule, we may have cleaned the output with a restat
-    // rule in a previous run and stored the most recent input mtime in the
-    // build log.  Use that mtime instead, so that the file will only be
-    // considered dirty if an input was modified since the previous run.
-    bool used_restat = false;
-    if (edge->GetBindingBool("restat") && build_log() &&
-        (entry = build_log()->LookupByOutput(output->path()))) {
-      output_mtime = entry->mtime;
-      used_restat = true;
-    }
-
-    if (output_mtime < most_recent_input->mtime()) {
-      EXPLAIN("%soutput %s older than most recent input %s "
-              "(%d vs %d)",
-              used_restat ? "restat of " : "", output->path().c_str(),
-              most_recent_input->path().c_str(),
-              output_mtime, most_recent_input->mtime());
-      return true;
-    }
-  }
-
-  if (build_log()) {
-    bool generator = edge->GetBindingBool("generator");
-    if (entry || (entry = build_log()->LookupByOutput(output->path()))) {
-      if (!generator &&
-          BuildLog::LogEntry::HashCommand(command) != entry->command_hash) {
-        // May also be dirty due to the command changing since the last build.
-        // But if this is a generator rule, the command changing does not make us
-        // dirty.
-        EXPLAIN("command line changed for %s", output->path().c_str());
-        return true;
-      }
-      if (most_recent_input && entry->mtime < most_recent_input->mtime()) {
-        // May also be dirty due to the mtime in the log being older than the
-        // mtime of the most recent input.  This can occur even when the mtime
-        // on disk is newer if a previous run wrote to the output file but
-        // exited with an error or was interrupted.
-        EXPLAIN("recorded mtime of %s older than most recent input %s (%d vs %d)",
-                output->path().c_str(), most_recent_input->path().c_str(),
-                entry->mtime, most_recent_input->mtime());
-        return true;
-      }
-    }
-    if (!entry && !generator) {
-      EXPLAIN("command line not found in log for %s", output->path().c_str());
-      return true;
-    }
-  }
-
-  return false;
 }
 
 */

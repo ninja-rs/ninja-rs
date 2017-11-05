@@ -12,5 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter, Error};
+
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default)]
 pub struct TimeStamp(pub isize);
+
+impl TimeStamp {
+    fn none() -> Self {
+        TimeStamp(0)
+    }
+
+    fn invalid() -> Self {
+        TimeStamp(-1)
+    }
+
+}
+
+impl Display for TimeStamp {
+    fn fmt(&self, formatter: & mut Formatter) -> Result<(), Error> {
+        <isize as Display>::fmt(&self.0, formatter)
+    }
+}
