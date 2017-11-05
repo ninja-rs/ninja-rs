@@ -38,12 +38,9 @@ pub struct ScopedMetric<'a> {
 
 impl<'a> ScopedMetric<'a> {
     pub fn new(metric: Option<&'a mut Metric>) -> Self {
-        let mut v = ScopedMetric {
-            metric,
-            start: 0,
-        };
+        let mut v = ScopedMetric { metric, start: 0 };
         if v.metric.is_some() {
-           v.start = high_res_timer();
+            v.start = high_res_timer();
         }
         v
     }
@@ -103,14 +100,12 @@ pub fn get_time_millis() -> u64 {
 /// A simple stopwatch which returns the time
 /// in seconds since Restart() was called.
 pub struct Stopwatch {
-    started: u64
+    started: u64,
 }
 
 impl Stopwatch {
     pub fn new() -> Self {
-        Stopwatch {
-          started: 0
-        }
+        Stopwatch { started: 0 }
     }
 
     /// Seconds since Restart() call.
@@ -125,7 +120,6 @@ impl Stopwatch {
     fn now() -> u64 {
         timer_to_micros(high_res_timer())
     }
-
 }
 
 
@@ -135,8 +129,14 @@ fn high_res_timer() -> u64 {
     use std::ptr;
     use errno;
 
-    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
-    if unsafe { libc::gettimeofday(&mut tv, ptr::null_mut()); } < 0 {
+    let mut tv = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    if unsafe {
+        libc::gettimeofday(&mut tv, ptr::null_mut());
+    } < 0
+    {
         fatal!("gettimeofday:{}", errno::errno());
     }
     return tv.tv_sec * 1000 * 1000 + tv.tv_usec;
@@ -150,7 +150,7 @@ fn high_res_timer() -> u64 {
     use errno;
 
     let mut counter = unsafe { mem::zeroed::<winapi::LARGE_INTEGER>() };
-    if 0 == unsafe { kernel32::QueryPerformanceCounter(&mut counter as _)} {
+    if 0 == unsafe { kernel32::QueryPerformanceCounter(&mut counter as _) } {
         fatal!("QueryPerformanceCounter: {}", errno::errno());
     }
 

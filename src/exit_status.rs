@@ -15,7 +15,7 @@
 
 #[derive(PartialEq)]
 pub enum ExitStatus {
-  ExitSuccess,
-  ExitFailure,
-  ExitInterrupted
+    ExitSuccess,
+    ExitFailure,
+    ExitInterrupted,
 }

@@ -15,7 +15,7 @@
 
 
 use std::path::Path;
-use std::fs::{self};
+use std::fs;
 use std::io::{self, Read, ErrorKind};
 
 use super::timestamp::TimeStamp;
@@ -134,16 +134,12 @@ impl FileReader for RealDiskInterface {
 
 impl DiskInterface for RealDiskInterface {
     fn make_dir(&self, path: &Path) -> Result<(), io::Error> {
-        fs::DirBuilder::new()
-            .recursive(false)
-            .create(path)?;
+        fs::DirBuilder::new().recursive(false).create(path)?;
         Ok(())
     }
 
     fn make_dirs(&self, path: &Path) -> Result<(), io::Error> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .create(path)?;
+        fs::DirBuilder::new().recursive(true).create(path)?;
         Ok(())
     }
 
@@ -151,30 +147,26 @@ impl DiskInterface for RealDiskInterface {
     fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
         use std::os::unix::fs::MetadataExt;
         metric_record!("node stat");
-        path.metadata().map(|m| {
-            TimeStamp(m.st_mtime() as isize)
-        }).or_else(|e| {
-            if e.kind() == ErrorKind::NotFound {
+        path.metadata()
+            .map(|m| TimeStamp(m.st_mtime() as isize))
+            .or_else(|e| if e.kind() == ErrorKind::NotFound {
                 Ok(TimeStamp(0))
             } else {
                 Err(format!("Stat({}): {}", path.display(), e))
-            }
-        })
+            })
     }
 
     #[cfg(windows)]
     fn stat(&self, path: &Path) -> Result<TimeStamp, String> {
         use std::os::windows::fs::MetadataExt;
         metric_record!("node stat");
-        path.metadata().map(|m| {
-            TimeStamp(m.last_write_time() as isize)
-        }).or_else(|e| {
-            if e.kind() == ErrorKind::NotFound {
+        path.metadata()
+            .map(|m| TimeStamp(m.last_write_time() as isize))
+            .or_else(|e| if e.kind() == ErrorKind::NotFound {
                 Ok(TimeStamp(0))
             } else {
                 Err(format!("Stat({}): {}", path.display(), e))
-            }
-        })
+            })
     }
 
     fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), ()> {
@@ -186,8 +178,7 @@ impl DiskInterface for RealDiskInterface {
 
         match remove_file(path) {
             Ok(()) => Ok(true),
-            Err(ref e) if e.kind() == ErrorKind::NotFound 
-                   => Ok(false),
+            Err(ref e) if e.kind() == ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
         }
     }

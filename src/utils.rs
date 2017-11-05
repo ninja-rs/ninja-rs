@@ -23,22 +23,24 @@ use std::path::PathBuf;
 /// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
 /// of a function to get timing stats recorded for each call of the function.
 macro_rules! metric_record {
-  ($metric: expr) => {
-      metric_record!($metric, METRIC_VAR, metric_borrow);
-  };
-  ($metric: expr, $metric_var: ident, $metric_borrow: ident) => { 
-      lazy_static! {
-          static ref $metric_var : Option<::std::sync::Arc<::std::sync::Mutex<$crate::metrics::Metric>>> = 
-              $crate::debug_flags::METRICS.as_ref().map(|m| m.lock().unwrap().new_metric($metric));
-      }
-      let mut $metric_borrow = $metric_var.as_ref().map(|r| r.lock().unwrap());
-      let _ = $crate::metrics::ScopedMetric::new($metric_borrow.as_mut().map(|r| &mut **r));
-  };
+    ($metric: expr) => {
+        metric_record!($metric, METRIC_VAR, metric_borrow);
+    };
+    ($metric: expr, $metric_var: ident, $metric_borrow: ident) => {
+    lazy_static! {
+        static ref $metric_var :
+            Option<::std::sync::Arc<::std::sync::Mutex<$crate::metrics::Metric>>> =
+                $crate::debug_flags::METRICS.as_ref()
+                    .map(|m| m.lock().unwrap().new_metric($metric));
+        }
+        let mut $metric_borrow = $metric_var.as_ref().map(|r| r.lock().unwrap());
+        let _ = $crate::metrics::ScopedMetric::new($metric_borrow.as_mut().map(|r| &mut **r));
+    };
 }
 
 #[macro_export]
 macro_rules! explain {
-    ($fmt:expr) => 
+    ($fmt:expr) =>
         (if $crate::debug_flags::EXPLAINING {
             eprint!(concat!("ninja explain: ", $fmt, "\n"))
         });
@@ -51,7 +53,7 @@ macro_rules! explain {
 /// Log a fatal message and exit.
 #[macro_export]
 macro_rules! fatal {
-    ($fmt:expr) => 
+    ($fmt:expr) =>
         ({
             eprint!(concat!("ninja fatal: ", $fmt, "\n"));
             $crate::utils::exit();
@@ -66,7 +68,7 @@ macro_rules! fatal {
 /// Log a warning message.
 #[macro_export]
 macro_rules! warning {
-    ($fmt:expr) => 
+    ($fmt:expr) =>
         (eprint!(concat!("ninja warning: ", $fmt, "\n")));
     ($fmt:expr, $($arg:tt)*) =>
         (eprint!(concat!("ninja warning: ", $fmt, "\n"), $($arg)*));
@@ -75,7 +77,7 @@ macro_rules! warning {
 /// Log an error message.
 #[macro_export]
 macro_rules! error {
-    ($fmt:expr) => 
+    ($fmt:expr) =>
         (eprint!(concat!("ninja error: ", $fmt, "\n")));
     ($fmt:expr, $($arg:tt)*) =>
         (eprint!(concat!("ninja error: ", $fmt, "\n"), $($arg)*));
@@ -105,7 +107,7 @@ pub fn exit() -> ! {
 }
 
 pub trait ZeroOrErrnoResult {
-    fn as_zero_errno_result(self) -> Result<(), errno::Errno>; 
+    fn as_zero_errno_result(self) -> Result<(), errno::Errno>;
 }
 
 impl ZeroOrErrnoResult for libc::c_int {
@@ -121,7 +123,12 @@ impl ZeroOrErrnoResult for libc::c_int {
 
 pub fn set_stdout_linebuffered() {
     unsafe {
-        libc::setvbuf(libc_stdhandle::stdout(), std::ptr::null_mut(), libc::_IOLBF, libc::BUFSIZ as _);
+        libc::setvbuf(
+            libc_stdhandle::stdout(),
+            std::ptr::null_mut(),
+            libc::_IOLBF,
+            libc::BUFSIZ as _,
+        );
     }
 }
 
@@ -141,8 +148,10 @@ fn pathbuf_from_bytes_os(bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
 
 pub fn pathbuf_from_bytes(mut bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
     bytes = match String::from_utf8(bytes) {
-      Ok(r) => { return Ok(PathBuf::from(r));},
-      Err(e) => { e.into_bytes() }
+        Ok(r) => {
+            return Ok(PathBuf::from(r));
+        }
+        Err(e) => e.into_bytes(),
     };
     return pathbuf_from_bytes_os(bytes);
 }
@@ -281,9 +290,9 @@ static bool IsPathSeparator(char c) {
 */
 
 #[cfg(windows)]
-pub const WINDOWS_PATH : bool = true;
+pub const WINDOWS_PATH: bool = true;
 #[cfg(not(windows))]
-pub const WINDOWS_PATH : bool = false;
+pub const WINDOWS_PATH: bool = false;
 
 fn is_path_separator(c: u8) -> bool {
     c == b'/' || WINDOWS_PATH && c == b'\\'
@@ -302,7 +311,7 @@ pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> 
     // any changes you make to it.
     metric_record!("canonicalize path");
     if path.is_empty() {
-        return Err("empty path".to_owned())
+        return Err("empty path".to_owned());
     }
 
     const MAX_PATH_COMPONENTS: usize = 60usize;
@@ -326,12 +335,12 @@ pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> 
     }
 
     while src < end {
-        if path[src] == b'.' && 
-            (src + 1 == end || is_path_separator(path[src + 1])) {
+        if path[src] == b'.' && (src + 1 == end || is_path_separator(path[src + 1])) {
             // '.' component; eliminate.
             src += 2;
-        } else if path[src] == b'.' && path[src + 1] == b'.' && 
-            (src + 2 == end || is_path_separator(path[src + 2])) {
+        } else if path[src] == b'.' && path[src + 1] == b'.' &&
+                   (src + 2 == end || is_path_separator(path[src + 2]))
+        {
             if component_count == 0 {
                 path[dst] = path[src];
                 path[dst + 1] = path[src + 1];
@@ -346,7 +355,10 @@ pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> 
             src += 1;
         } else {
             if component_count == MAX_PATH_COMPONENTS {
-                fatal!("path has too many components : {}", String::from_utf8_lossy(path));
+                fatal!(
+                    "path has too many components : {}",
+                    String::from_utf8_lossy(path)
+                );
             }
 
             components[component_count] = dst;
@@ -357,7 +369,8 @@ pub fn canonicalize_path_slice(path: &mut [u8]) -> Result<(usize, u64), String> 
                 dst += 1;
                 src += 1;
                 src < end && !is_path_separator(path[dst - 1])
-            } {};
+            }
+            {}
         }
     }
 
@@ -425,8 +438,8 @@ static inline bool IsKnownShellSafeCharacter(char ch) {
 
 fn is_known_win32_safe_char(ch: u8) -> bool {
     match ch {
-    b' ' | b'"' => false,
-    _ => true, 
+        b' ' | b'"' => false,
+        _ => true,
     }
 }
 
@@ -515,7 +528,7 @@ impl ExtendFromEscapedSlice<u8> for Vec<u8> {
             self.extend_from_slice(input);
             return;
         }
-/*
+        /*
   const char kQuote = '"';
   const char kBackslash = '\\';
 
@@ -722,16 +735,16 @@ pub fn get_load_average() -> Option<f64> {
     }
 
     fn calculate_processor_load(idle_ticks: u64, total_ticks: u64) -> Option<f64> {
-        static mut PREVIOUS_IDLE_TICKS : u64 = 0;
-        static mut PREVIOUS_TOTAL_TICKS : u64 = 0;
-        static mut PREVIOUS_LOAD : Option<f64> = None;
+        static mut PREVIOUS_IDLE_TICKS: u64 = 0;
+        static mut PREVIOUS_TOTAL_TICKS: u64 = 0;
+        static mut PREVIOUS_LOAD: Option<f64> = None;
 
-        let (previous_idle_ticks, previous_total_ticks, previous_load) = 
-            unsafe { (PREVIOUS_IDLE_TICKS, PREVIOUS_TOTAL_TICKS, PREVIOUS_LOAD)};
+        let (previous_idle_ticks, previous_total_ticks, previous_load) =
+            unsafe { (PREVIOUS_IDLE_TICKS, PREVIOUS_TOTAL_TICKS, PREVIOUS_LOAD) };
 
         let idle_ticks_since_last_time = idle_ticks - previous_idle_ticks;
         let total_ticks_since_last_time = total_ticks - previous_total_ticks;
-        
+
         let first_call = previous_total_ticks == 0;
         let ticks_not_updated_since_last_call = total_ticks_since_last_time == 0;
 
@@ -739,8 +752,9 @@ pub fn get_load_average() -> Option<f64> {
         if first_call || ticks_not_updated_since_last_call {
             load = previous_load;
         } else {
-            // Calculate load.          
-            let idle_to_total_ratio = idle_ticks_since_last_time as f64 / total_ticks_since_last_time as f64;
+            // Calculate load.
+            let idle_to_total_ratio = idle_ticks_since_last_time as f64 /
+                total_ticks_since_last_time as f64;
             let load_since_last_call = 1.0f64 - idle_to_total_ratio;
 
             // Filter/smooth result when possible.
@@ -765,7 +779,9 @@ pub fn get_load_average() -> Option<f64> {
         let mut kernel_time = zeroed::<FILETIME>();
         let mut user_time = zeroed::<FILETIME>();
 
-        if kernel32::GetSystemTimes(&mut idle_time, &mut kernel_time, &mut user_time) == winapi::FALSE {
+        if kernel32::GetSystemTimes(&mut idle_time, &mut kernel_time, &mut user_time) ==
+            winapi::FALSE
+        {
             return None;
         };
 
@@ -823,7 +839,7 @@ double GetLoadAverage() {
 */
 #[cfg(unix)]
 pub fn get_load_average() -> Option<f64> {
-    let mut load_avg : [f64; 3] = [0.0f64, 0.0f64, 0.0f64];
+    let mut load_avg: [f64; 3] = [0.0f64, 0.0f64, 0.0f64];
     unsafe {
         if libc::getloadavg(load_avg.as_mut().ptr_mut(), 3) < 0 {
             return None;
@@ -890,7 +906,10 @@ mod tests {
         assert_eq!(canonicalize_path(&mut vec![]), Err("empty path".to_owned()));
 
         let test_items = vec![
-            TestItem { path: b"foo.h", result: b"foo.h" }
+            TestItem {
+                path: b"foo.h",
+                result: b"foo.h",
+            },
         ];
 
         for test_item in test_items {

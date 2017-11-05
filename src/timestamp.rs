@@ -26,11 +26,10 @@ impl TimeStamp {
     fn invalid() -> Self {
         TimeStamp(-1)
     }
-
 }
 
 impl Display for TimeStamp {
-    fn fmt(&self, formatter: & mut Formatter) -> Result<(), Error> {
+    fn fmt(&self, formatter: &mut Formatter) -> Result<(), Error> {
         <isize as Display>::fmt(&self.0, formatter)
     }
 }

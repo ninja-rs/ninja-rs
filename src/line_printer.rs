@@ -17,8 +17,8 @@ use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum LinePrinterLineType {
-  Full,
-  Elide,
+    Full,
+    Elide,
 }
 
 #[cfg(not(windows))]
@@ -26,7 +26,9 @@ struct LinePrinterOs {}
 
 #[cfg(not(windows))]
 impl LinePrinterOs {
-    fn new() -> Self { LinePrinterOs{} }
+    fn new() -> Self {
+        LinePrinterOs {}
+    }
 
     fn should_be_smart(&self) -> bool {
         use libc;
@@ -52,12 +54,10 @@ struct LinePrinterOs {
 
 #[cfg(windows)]
 impl LinePrinterOs {
-    fn new() -> Self { 
+    fn new() -> Self {
         use kernel32;
         use winapi;
-        LinePrinterOs{
-            console: unsafe { kernel32::GetStdHandle(winapi::STD_OUTPUT_HANDLE) },
-        }
+        LinePrinterOs { console: unsafe { kernel32::GetStdHandle(winapi::STD_OUTPUT_HANDLE) } }
     }
 
     fn should_be_smart(&self) -> bool {
@@ -66,7 +66,7 @@ impl LinePrinterOs {
         use std::mem;
 
         let mut csbi = unsafe { mem::zeroed::<winapi::CONSOLE_SCREEN_BUFFER_INFO>() };
-        unsafe { 
+        unsafe {
             kernel32::GetConsoleScreenBufferInfo(self.console, &mut csbi as *mut _) != winapi::FALSE
         }
     }
@@ -114,8 +114,12 @@ impl LinePrinter {
         }
     }
 
-    pub fn is_smart_terminal(&self) -> bool { self.smart_terminal }
-    pub fn set_smart_terminal(&mut self, smart: bool) { self.smart_terminal = smart; }
+    pub fn is_smart_terminal(&self) -> bool {
+        self.smart_terminal
+    }
+    pub fn set_smart_terminal(&mut self, smart: bool) {
+        self.smart_terminal = smart;
+    }
 
     /// Overprints the current line. If type is ELIDE, elides to_print to fit on
     /// one line.
@@ -131,9 +135,9 @@ impl LinePrinter {
             // On Windows, calling a C library function writing to stdout also handles
             // pausing the executable when the "Pause" key or Ctrl-S is pressed.
         }
-        
+
         if self.smart_terminal && line_type == LinePrinterLineType::Elide {
-/*
+            /*
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(console_, &csbi);

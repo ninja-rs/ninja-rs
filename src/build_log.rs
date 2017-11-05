@@ -41,7 +41,7 @@ pub trait BuildLogUser {
 pub struct BuildLog<'a> {
     entries: BuildLogEntries<'a>,
     log_file: Option<File>,
-    needs_recompaction: bool
+    needs_recompaction: bool,
 }
 
 impl<'a> BuildLog<'a> {
@@ -53,16 +53,33 @@ impl<'a> BuildLog<'a> {
         }
     }
 
-    pub fn open_for_write<User: BuildLogUser>(&self, path: &Path, user: &User) -> Result<(), String> {
+    pub fn open_for_write<User: BuildLogUser>(
+        &self,
+        path: &Path,
+        user: &User,
+    ) -> Result<(), String> {
         return Ok(());
         unimplemented!()
     }
 
-    pub fn record_command_without_timestamp(&self, state: &State, edge_idx: EdgeIndex, start_time: u64, end_time: u64) -> Result<(), ()> {
+    pub fn record_command_without_timestamp(
+        &self,
+        state: &State,
+        edge_idx: EdgeIndex,
+        start_time: u64,
+        end_time: u64,
+    ) -> Result<(), ()> {
         self.record_command(state, edge_idx, start_time, end_time, TimeStamp::default())
     }
 
-    pub fn record_command(&self, state: &State, edge_idx: EdgeIndex, start_time: u64, end_time: u64, mtime: TimeStamp) -> Result<(), ()> {
+    pub fn record_command(
+        &self,
+        state: &State,
+        edge_idx: EdgeIndex,
+        start_time: u64,
+        end_time: u64,
+        mtime: TimeStamp,
+    ) -> Result<(), ()> {
         return Ok(());
         unimplemented!()
     }
@@ -112,9 +129,13 @@ impl BuildLogEntry {
         unimplemented!()
     }
 
-    pub fn new(output: &str, command_hash: u64,
-             start_time: isize, end_time: isize,
-             restat_mtime: TimeStamp) -> Self {
+    pub fn new(
+        output: &str,
+        command_hash: u64,
+        start_time: isize,
+        end_time: isize,
+        restat_mtime: TimeStamp,
+    ) -> Self {
         unimplemented!()
     }
 

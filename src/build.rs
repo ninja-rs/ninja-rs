@@ -31,8 +31,8 @@ use super::utils::{get_load_average, pathbuf_from_bytes};
 use super::line_printer::{LinePrinter, LinePrinterLineType};
 
 pub enum EdgeResult {
-  EdgeFailed,
-  EdgeSucceeded
+    EdgeFailed,
+    EdgeSucceeded,
 }
 
 /// Plan stores the state of a build plan: what we intend to build,
@@ -67,10 +67,10 @@ impl<'a, K, V> IsVacant for btree_map::Entry<'a, K, V> {
 impl Plan {
     pub fn new() -> Self {
         Plan {
-          wanted_edges: 0usize,
-          command_edges: 0usize,
-          want: BTreeMap::new(),
-          ready: BTreeSet::new(),
+            wanted_edges: 0usize,
+            command_edges: 0usize,
+            want: BTreeMap::new(),
+            ready: BTreeSet::new(),
         }
     }
 
@@ -81,15 +81,22 @@ impl Plan {
         self.add_sub_target(state, node, None)
     }
 
-    pub fn add_sub_target(&mut self, state: &State, node_idx: NodeIndex, dependent: Option<NodeIndex>) -> Result<bool, String> {
+    pub fn add_sub_target(
+        &mut self,
+        state: &State,
+        node_idx: NodeIndex,
+        dependent: Option<NodeIndex>,
+    ) -> Result<bool, String> {
         let node = state.node_state.get_node(node_idx);
         let edge_idx = node.in_edge();
         if edge_idx.is_none() {
             if node.is_dirty() {
                 let mut err = format!("'{}'", String::from_utf8_lossy(node.path()));
                 if let Some(dependent) = dependent {
-                    err += &format!(", needed by '{}',", 
-                        String::from_utf8_lossy(state.node_state.get_node(dependent).path()));
+                    err += &format!(
+                        ", needed by '{}',",
+                        String::from_utf8_lossy(state.node_state.get_node(dependent).path())
+                    );
                 }
                 err += " missing and no known rule to make it";
                 return Err(err);
@@ -153,7 +160,7 @@ impl Plan {
             // This edge has already been scheduled.  We can get here again if an edge
             // and one of its dependencies share an order-only input, or if a node
             // duplicates an out edge (see https://github.com/ninja-build/ninja/pull/519).
-            // Avoid scheduling the work again.          
+            // Avoid scheduling the work again.
             return;
         }
 
@@ -172,18 +179,18 @@ impl Plan {
     // Returns NULL if there's no work to do.
     pub fn find_work(&mut self) -> Option<EdgeIndex> {
         match self.ready.iter().next().cloned() {
-          Some(idx) => {
-            self.ready.remove(&idx);
-            Some(idx)
-          },
-          None => None,
+            Some(idx) => {
+                self.ready.remove(&idx);
+                Some(idx)
+            }
+            None => None,
         }
     }
 
     /// Mark an edge as done building (whether it succeeded or failed).
     pub fn edge_finished(&mut self, state: &mut State, edge_idx: EdgeIndex, result: EdgeResult) {
         let directly_wanted = self.want.get(&edge_idx).unwrap().clone();
-        
+
         {
             let edge = state.edge_state.get_edge(edge_idx);
 
@@ -192,7 +199,10 @@ impl Plan {
                 edge.pool.borrow_mut().edge_finished(state, edge_idx);
             }
 
-            edge.pool.borrow_mut().retrieve_ready_edges(state, &mut self.ready);
+            edge.pool.borrow_mut().retrieve_ready_edges(
+                state,
+                &mut self.ready,
+            );
         }
 
 
@@ -206,22 +216,34 @@ impl Plan {
                 state.edge_state.get_edge_mut(edge_idx).outputs_ready = true;
 
                 // Check off any nodes we were waiting for with this edge.
-                for output_node_idx in state.edge_state.get_edge_mut(edge_idx).outputs.clone().into_iter() {
+                for output_node_idx in state
+                    .edge_state
+                    .get_edge_mut(edge_idx)
+                    .outputs
+                    .clone()
+                    .into_iter()
+                {
                     self.node_finished(state, output_node_idx);
                 }
-            },
+            }
             _ => {}
         };
     }
 
     pub fn node_finished(&mut self, state: &mut State, node_idx: NodeIndex) {
         // See if we we want any edges from this node.
-        for out_edge_idx in state.node_state.get_node(node_idx).out_edges().to_owned().into_iter() {
+        for out_edge_idx in state
+            .node_state
+            .get_node(node_idx)
+            .out_edges()
+            .to_owned()
+            .into_iter()
+        {
             let want_e = self.want.get(&out_edge_idx).cloned();
             if want_e.is_none() {
                 continue;
             }
-            
+
             {
                 let oe = state.edge_state.get_edge(out_edge_idx);
                 if !oe.all_inputs_ready(state) {
@@ -241,7 +263,12 @@ impl Plan {
 
     /// Clean the given node during the build.
     /// Return false on error.
-    pub fn clean_node(&mut self, scan: &DependencyScan, State: &State, node_idx: NodeIndex) -> Result<(), String> {
+    pub fn clean_node(
+        &mut self,
+        scan: &DependencyScan,
+        State: &State,
+        node_idx: NodeIndex,
+    ) -> Result<(), String> {
         unimplemented!()
     }
 }
@@ -313,7 +340,7 @@ pub trait CommandRunner {
 
 pub enum BuildConfigVerbosity {
     NORMAL,
-    QUIET,  // No output -- used when testing.
+    QUIET, // No output -- used when testing.
     VERBOSE,
 }
 
@@ -359,7 +386,10 @@ struct BuildConfig {
 */
 
 /// Builder wraps the build process: starting commands, updating status.
-pub struct Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
+pub struct Builder<'s, 'p, 'a, 'b, 'c>
+where
+    's: 'a,
+{
     state: &'s mut State,
     config: &'p BuildConfig,
     plan: Plan,
@@ -369,10 +399,17 @@ pub struct Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
     status: BuildStatus<'p>,
 }
 
-impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
-    pub fn new(state: &'s mut State, config: &'p BuildConfig, 
-          build_log: &'a BuildLog<'s>, deps_log: &'b DepsLog,
-          disk_interface: &'c DiskInterface) -> Self {
+impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c>
+where
+    's: 'a,
+{
+    pub fn new(
+        state: &'s mut State,
+        config: &'p BuildConfig,
+        build_log: &'a BuildLog<'s>,
+        deps_log: &'b DepsLog,
+        disk_interface: &'c DiskInterface,
+    ) -> Self {
         Builder {
             state,
             config,
@@ -380,7 +417,7 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
             command_runner: None,
             disk_interface,
             scan: DependencyScan::new(build_log, deps_log, disk_interface),
-            status: BuildStatus::new(config)
+            status: BuildStatus::new(config),
         }
     }
 
@@ -410,7 +447,9 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
     pub fn build(&mut self) -> Result<(), String> {
         assert!(!self.is_already_up_to_date());
 
-        self.status.plan_has_total_edges(self.plan.command_edge_count());
+        self.status.plan_has_total_edges(
+            self.plan.command_edge_count(),
+        );
 
         let mut pending_commands = 0;
         let mut failures_allowed = self.config.failures_allowed;
@@ -433,7 +472,7 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
         // First, we attempt to start as many commands as allowed by the
         // command runner.
         // Second, we attempt to wait for / reap the next finished command.
-        
+
         while self.plan.more_to_do() {
             // See if we can start any more commands.
             if failures_allowed > 0 && self.command_runner.as_ref().unwrap().can_run_more() {
@@ -445,7 +484,11 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
                     };
 
                     if self.state.edge_state.get_edge(edge_idx).is_phony() {
-                        self.plan.edge_finished(self.state, edge_idx, EdgeResult::EdgeSucceeded);
+                        self.plan.edge_finished(
+                            self.state,
+                            edge_idx,
+                            EdgeResult::EdgeSucceeded,
+                        );
                     } else {
                         pending_commands += 1;
                     }
@@ -459,7 +502,9 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
             if pending_commands > 0 {
                 let result = self.command_runner.as_mut().unwrap().wait_for_command();
 
-                if result.is_none() || result.as_ref().unwrap().status == ExitStatus::ExitInterrupted {
+                if result.is_none() ||
+                    result.as_ref().unwrap().status == ExitStatus::ExitInterrupted
+                {
                     self.cleanup();
                     self.status.build_finished();
                     return Err("interrupted by user".to_owned());
@@ -487,11 +532,13 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
             // If we get here, we cannot make any more progress.
             self.status.build_finished();
             return match failures_allowed {
-              0 if config.failures_allowed > 1 => Err("subcommands failed".to_owned()),
-              0 => Err("subcommand failed".to_owned()),
-              _ if failures_allowed < self.config.failures_allowed => 
-                  Err("cannot make progress due to previous errors".to_owned()),
-              _ => Err("stuck [this is a bug]".to_owned()),
+                0 if config.failures_allowed > 1 => Err("subcommands failed".to_owned()),
+                0 => Err("subcommand failed".to_owned()),
+                _ if failures_allowed < self.config.failures_allowed => Err(
+                    "cannot make progress due to previous errors"
+                        .to_owned(),
+                ),
+                _ => Err("stuck [this is a bug]".to_owned()),
             };
         }
 
@@ -511,10 +558,15 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
         // Create directories necessary for outputs.
         // XXX: this will block; do we care?
         for out_idx in edge.outputs.iter() {
-            let path = pathbuf_from_bytes(self.state.node_state.get_node(*out_idx).path().to_owned())
-                .map_err(|e| format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e)))?;
+            let path = pathbuf_from_bytes(
+                self.state.node_state.get_node(*out_idx).path().to_owned(),
+            ).map_err(|e| {
+                format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e))
+            })?;
             if let Some(parent) = path.parent() {
-                self.disk_interface.make_dirs(parent).map_err(|e| format!("{}", e))?;
+                self.disk_interface.make_dirs(parent).map_err(
+                    |e| format!("{}", e),
+                )?;
             }
         }
 
@@ -524,14 +576,25 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
         if !rspfile.as_ref().is_empty() {
             let content = edge.get_binding(&self.state.node_state, b"rspfile_content");
             let rspfile_path = pathbuf_from_bytes(rspfile.into_owned()).map_err(|e| {
-              format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e))
+                format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e))
             })?;
-            self.disk_interface.write_file(&rspfile_path, content.as_ref()).map_err(|_| String::new())?;
+            self.disk_interface
+                .write_file(&rspfile_path, content.as_ref())
+                .map_err(|_| String::new())?;
         }
 
         // start command computing and run it
-        if !self.command_runner.as_mut().unwrap().start_command(self.state, edge_idx) {
-            return Err(format!("command '{}' failed.", String::from_utf8_lossy(&edge.evaluate_command(&self.state.node_state))));
+        if !self.command_runner.as_mut().unwrap().start_command(
+            self.state,
+            edge_idx,
+        )
+        {
+            return Err(format!(
+                "command '{}' failed.",
+                String::from_utf8_lossy(
+                    &edge.evaluate_command(&self.state.node_state),
+                )
+            ));
         }
 
         Ok(())
@@ -539,7 +602,10 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
     /// Update status ninja logs following a command termination.
     /// @return false if the build can not proceed further due to a fatal error.
-    fn finish_command(&mut self, mut result: CommandRunnerResult) -> Result<CommandRunnerResult, String> {
+    fn finish_command(
+        &mut self,
+        mut result: CommandRunnerResult,
+    ) -> Result<CommandRunnerResult, String> {
         use errno;
 
         metric_record!("FinishCommand");
@@ -561,7 +627,9 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
         };
         if !deps_type.is_empty() {
             match self.extract_deps(&mut result, deps_type.as_ref(), deps_prefix.as_ref()) {
-                Ok(n) => { deps_nodes = n; },
+                Ok(n) => {
+                    deps_nodes = n;
+                }
                 Err(e) => {
                     if result.is_success() {
                         if !result.output.is_empty() {
@@ -571,14 +639,22 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
                         result.status = ExitStatus::ExitFailure;
                     }
                 }
-            }            
+            }
         }
 
-        let (start_time, end_time) = 
-            self.status.build_edge_finished(self.state, edge_idx, result.is_success(), &result.output);
-        
+        let (start_time, end_time) = self.status.build_edge_finished(
+            self.state,
+            edge_idx,
+            result.is_success(),
+            &result.output,
+        );
+
         if !result.is_success() {
-            self.plan.edge_finished(self.state, edge_idx, EdgeResult::EdgeFailed);
+            self.plan.edge_finished(
+                self.state,
+                edge_idx,
+                EdgeResult::EdgeFailed,
+            );
             return Ok(result);
         }
 
@@ -586,7 +662,11 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
         // Restat the edge outputs
         let mut output_mtime = TimeStamp(0);
-        let restat = self.state.edge_state.get_edge(edge_idx).get_binding_bool(&self.state.node_state, b"restat");
+        let restat = self.state.edge_state.get_edge(edge_idx).get_binding_bool(
+            &self.state
+                .node_state,
+            b"restat",
+        );
         if !self.config.dry_run {
             let edge = self.state.edge_state.get_edge(edge_idx);
             let mut node_cleaned = false;
@@ -613,18 +693,22 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
                 // If any output was cleaned, find the most recent mtime of any
                 // (existing) non-order-only input or the depfile.
                 for i_idx in edge.inputs[edge.non_order_only_deps_range()].iter() {
-                    let path = pathbuf_from_bytes(self.state.node_state.get_node(*i_idx).path().to_owned())
-                        .map_err(|e| format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e)))?;
+                    let path = pathbuf_from_bytes(
+                        self.state.node_state.get_node(*i_idx).path().to_owned(),
+                    ).map_err(|e| {
+                        format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e))
+                    })?;
                     let input_mtime = self.disk_interface.stat(&path)?;
                     if input_mtime > restat_mtime {
                         restat_mtime = input_mtime;
                     }
                 }
-                
+
                 let depfile = edge.get_unescaped_depfile(&self.state.node_state);
                 if restat_mtime.0 != 0 && deps_type.is_empty() && !depfile.is_empty() {
-                    let path = pathbuf_from_bytes(depfile.into_owned())
-                        .map_err(|e| format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e)))?;
+                    let path = pathbuf_from_bytes(depfile.into_owned()).map_err(|e| {
+                        format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e))
+                    })?;
                     let depfile_mtime = self.disk_interface.stat(&path)?;
                     if depfile_mtime > restat_mtime {
                         restat_mtime = depfile_mtime;
@@ -633,12 +717,18 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
                 // The total number of edges in the plan may have changed as a result
                 // of a restat.
-                self.status.plan_has_total_edges(self.plan.command_edge_count());
+                self.status.plan_has_total_edges(
+                    self.plan.command_edge_count(),
+                );
                 output_mtime = restat_mtime;
             }
         }
 
-        self.plan.edge_finished(self.state, edge_idx, EdgeResult::EdgeSucceeded);
+        self.plan.edge_finished(
+            self.state,
+            edge_idx,
+            EdgeResult::EdgeSucceeded,
+        );
 
         let edge = self.state.edge_state.get_edge(edge_idx);
         let rspfile = edge.get_unescaped_rspfile(&self.state.node_state);
@@ -649,9 +739,11 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
         }
 
         if let Some(build_log) = self.scan.build_log() {
-            build_log.record_command(self.state, edge_idx, start_time, end_time, output_mtime).map_err(|e| {
-                format!("Error writing to build log: {}", errno::errno())
-            })?;
+            build_log
+                .record_command(self.state, edge_idx, start_time, end_time, output_mtime)
+                .map_err(|e| {
+                    format!("Error writing to build log: {}", errno::errno())
+                })?;
         }
 
         if !deps_type.is_empty() && !self.config.dry_run {
@@ -665,9 +757,10 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
             let deps_mtime = self.disk_interface.stat(&path)?;
 
-            self.scan.deps_log().record_deps(self.state, out_idx, deps_mtime, &deps_nodes).map_err(|e| {
-                format!("Error writing to deps log: {}", errno::errno())
-            })?;
+            self.scan
+                .deps_log()
+                .record_deps(self.state, out_idx, deps_mtime, &deps_nodes)
+                .map_err(|e| format!("Error writing to deps log: {}", errno::errno()))?;
         }
 
         Ok(result)
@@ -679,12 +772,13 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
             return;
         }
         let command_runner = self.command_runner.as_mut().unwrap();
-        
+
         let active_edges = command_runner.get_active_edges();
         command_runner.abort();
         for edge_idx in active_edges.into_iter() {
             let edge = self.state.edge_state.get_edge(edge_idx);
-            let depfile = edge.get_unescaped_depfile(&self.state.node_state).into_owned();
+            let depfile = edge.get_unescaped_depfile(&self.state.node_state)
+                .into_owned();
             for out_idx in edge.outputs.iter() {
                 // Only delete this output if it was actually modified.  This is
                 // important for things like the generator where we don't want to
@@ -695,32 +789,44 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
                 // but is interrupted before it touches its output file.)
                 let out_node = self.state.node_state.get_node(*out_idx);
                 match pathbuf_from_bytes(out_node.path().to_owned()) {
-                  Err(e) => {error!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e));},
-                  Ok(path) => {
-                      match self.disk_interface.stat(&path) {
-                          Err(e) => {error!("{}", e);}
-                          Ok(new_mtime) => {
-                              if !depfile.is_empty() || out_node.mtime() != new_mtime {
-                                  let _ = self.disk_interface.remove_file(&path);
-                              }
-                          }
-                      }
-                  }
+                    Err(e) => {
+                        error!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e));
+                    }
+                    Ok(path) => {
+                        match self.disk_interface.stat(&path) {
+                            Err(e) => {
+                                error!("{}", e);
+                            }
+                            Ok(new_mtime) => {
+                                if !depfile.is_empty() || out_node.mtime() != new_mtime {
+                                    let _ = self.disk_interface.remove_file(&path);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if !depfile.is_empty() {
                 match pathbuf_from_bytes(depfile) {
-                  Err(e) => {error!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e));},
-                  Ok(path) => { let _ = self.disk_interface.remove_file(&path); },
+                    Err(e) => {
+                        error!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e));
+                    }
+                    Ok(path) => {
+                        let _ = self.disk_interface.remove_file(&path);
+                    }
                 };
             }
         }
     }
 
-    fn extract_deps(&self, result: &mut CommandRunnerResult, deps_type: &[u8], deps_prefix: &[u8])
-        -> Result<Vec<NodeIndex>, String> {
-          if deps_type == b"msvc" {
-/*
+    fn extract_deps(
+        &self,
+        result: &mut CommandRunnerResult,
+        deps_type: &[u8],
+        deps_prefix: &[u8],
+    ) -> Result<Vec<NodeIndex>, String> {
+        if deps_type == b"msvc" {
+            /*
     CLParser parser;
     string output;
     if (!parser.Parse(result->output, deps_prefix, &output, err))
@@ -735,10 +841,10 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
       deps_nodes->push_back(state_->GetNode(*i, ~0u));
     }
 */
-              return Ok(Vec::new());
-              unimplemented!{}
-          } else if deps_type == b"gcc" {
-/*
+            return Ok(Vec::new());
+            unimplemented!{}
+        } else if deps_type == b"gcc" {
+            /*
     string depfile = result->edge->GetUnescapedDepfile();
     if (depfile.empty()) {
       *err = string("edge with deps=gcc but no depfile makes no sense");
@@ -781,11 +887,11 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
       }
     }
 */
-              unimplemented!{}
-          } else {
-              fatal!("unknown deps type '{}'", String::from_utf8_lossy(deps_type));
-              unreachable!();
-          }
+            unimplemented!{}
+        } else {
+            fatal!("unknown deps type '{}'", String::from_utf8_lossy(deps_type));
+            unreachable!();
+        }
     }
 }
 
@@ -836,8 +942,8 @@ struct Builder {
 */
 
 enum BuildStatusEdgeStatus {
-  EdgeStarted,
-  EdgeFinished,
+    EdgeStarted,
+    EdgeFinished,
 }
 
 /// Tracks the status of a build: completion fraction, printing updates.
@@ -848,7 +954,8 @@ struct BuildStatus<'a> {
     start_time_millis: u64,
 
     started_edges: usize,
-    running_edges: BTreeMap<EdgeIndex, u64>, /// Map of running edge to time the edge started running.
+    running_edges: BTreeMap<EdgeIndex, u64>,
+    /// Map of running edge to time the edge started running.
     finished_edges: usize,
     total_edges: usize,
 
@@ -874,7 +981,7 @@ impl<'a> BuildStatus<'a> {
             finished_edges: 0,
             total_edges: 0,
 
-            progress_status_format: Vec::new(),  // TODO
+            progress_status_format: Vec::new(), // TODO
             printer: LinePrinter::new(),
 
             overall_rate: RefCell::new(RateInfo::new()),
@@ -913,7 +1020,13 @@ impl<'a> BuildStatus<'a> {
         }
     }
 
-    pub fn build_edge_finished(&mut self, state: &State, edge_idx: EdgeIndex, success: bool, output: &[u8]) -> (u64, u64) {
+    pub fn build_edge_finished(
+        &mut self,
+        state: &State,
+        edge_idx: EdgeIndex,
+        success: bool,
+        output: &[u8],
+    ) -> (u64, u64) {
         let now = get_time_millis();
         self.finished_edges += 1;
 
@@ -925,11 +1038,13 @@ impl<'a> BuildStatus<'a> {
         }
 
         match self.config.verbosity {
-          BuildConfigVerbosity::QUIET => { return (start_time, end_time); }
-          _ => {},
+            BuildConfigVerbosity::QUIET => {
+                return (start_time, end_time);
+            }
+            _ => {}
         };
 
-/*
+        /*
   if (!edge->use_console())
     PrintStatus(edge, kEdgeFinished);
 
@@ -984,14 +1099,19 @@ impl<'a> BuildStatus<'a> {
     /// placeholders.
     /// @param progress_status_format The format of the progress status.
     /// @param status The status of the edge.
-    pub fn format_progress_status(progress_status_format: &[u8], status: BuildStatusEdgeStatus) -> Vec<u8> {
+    pub fn format_progress_status(
+        progress_status_format: &[u8],
+        status: BuildStatusEdgeStatus,
+    ) -> Vec<u8> {
         return Vec::new();
         unimplemented!()
     }
 
     fn print_status(&self, state: &State, edge_idx: EdgeIndex, status: BuildStatusEdgeStatus) {
         let force_full_command = match self.config.verbosity {
-            BuildConfigVerbosity::QUIET => {return;},
+            BuildConfigVerbosity::QUIET => {
+                return;
+            }
             BuildConfigVerbosity::VERBOSE => true,
             BuildConfigVerbosity::NORMAL => false,
         };
@@ -1004,7 +1124,11 @@ impl<'a> BuildStatus<'a> {
 
         let mut to_print = Self::format_progress_status(&self.progress_status_format, status);
         to_print.extend_from_slice(&desc_or_cmd);
-        let ty = if force_full_command { LinePrinterLineType::Full } else { LinePrinterLineType::Elide };
+        let ty = if force_full_command {
+            LinePrinterLineType::Full
+        } else {
+            LinePrinterLineType::Elide
+        };
         self.printer.print(&to_print, ty);
     }
 }
@@ -1178,14 +1302,12 @@ impl SlidingRateInfo {
 use std::collections::VecDeque;
 
 struct DryRunCommandRunner {
-    finished: VecDeque<EdgeIndex>
+    finished: VecDeque<EdgeIndex>,
 }
 
 impl DryRunCommandRunner {
     pub fn new() -> Self {
-        DryRunCommandRunner{
-            finished: VecDeque::new(),
-        }
+        DryRunCommandRunner { finished: VecDeque::new() }
     }
 }
 
@@ -1206,11 +1328,11 @@ impl CommandRunner for DryRunCommandRunner {
                 edge: e,
                 status: ExitStatus::ExitSuccess,
                 output: Vec::new(),
-            })
+            }),
         }
     }
 
-    fn get_active_edges(&self) -> Vec<EdgeIndex>  {
+    fn get_active_edges(&self) -> Vec<EdgeIndex> {
         Vec::new()
     }
 
@@ -1528,12 +1650,14 @@ impl<'a> CommandRunner for RealCommandRunner<'a> {
         }
         return false;
     }
-    
+
     fn start_command(&mut self, state: &State, edge_idx: EdgeIndex) -> bool {
         let edge = state.edge_state.get_edge(edge_idx);
         let command = edge.evaluate_command(&state.node_state);
 
-        return self.subprocs.add(&command, edge.use_console(), edge_idx).is_some();
+        return self.subprocs
+            .add(&command, edge.use_console(), edge_idx)
+            .is_some();
     }
 
     fn wait_for_command(&mut self) -> Option<CommandRunnerResult> {
@@ -1549,7 +1673,7 @@ impl<'a> CommandRunner for RealCommandRunner<'a> {
 
         let status = subproc.finish();
         let output = subproc.output().to_owned();
-        Some(CommandRunnerResult{
+        Some(CommandRunnerResult {
             status,
             output,
             edge: edge_idx,
@@ -1740,9 +1864,7 @@ mod tests {
 
     impl Default for PlanTestData {
         fn default() -> Self {
-            PlanTestData {
-                plan: Plan::new(),
-            }
+            PlanTestData { plan: Plan::new() }
         }
     }
 
@@ -1754,7 +1876,7 @@ mod tests {
         }
     }
 
-/*
+    /*
 
 /// Fixture for tests involving Plan.
 // Though Plan doesn't use State, it's useful to have one around
@@ -1788,9 +1910,9 @@ struct PlanTest : public StateTestWithBuiltinRules {
     #[test]
     fn plantest_basic() {
         let mut plantest = PlanTest::new();
-        plantest.assert_parse(concat!(
-            "build out: cat mid\n",
-            "build mid: cat in\n").as_bytes());
+        plantest.assert_parse(
+            concat!("build out: cat mid\n", "build mid: cat in\n").as_bytes(),
+        );
         plantest.assert_with_node_mut(b"mid", Node::mark_dirty);
         plantest.assert_with_node_mut(b"out", Node::mark_dirty);
         let out_node_idx = plantest.assert_node_idx(b"out");
@@ -1829,9 +1951,9 @@ struct PlanTest : public StateTestWithBuiltinRules {
     #[test]
     fn plantest_double_output_direct() {
         let mut plantest = PlanTest::new();
-        plantest.assert_parse(concat!(
-            "build out: cat mid1 mid2\n",
-            "build mid1 mid2: cat in\n").as_bytes());
+        plantest.assert_parse(
+            concat!("build out: cat mid1 mid2\n", "build mid1 mid2: cat in\n").as_bytes(),
+        );
         plantest.assert_with_node_mut(b"mid1", Node::mark_dirty);
         plantest.assert_with_node_mut(b"mid2", Node::mark_dirty);
         plantest.assert_with_node_mut(b"out", Node::mark_dirty);
@@ -1843,10 +1965,10 @@ struct PlanTest : public StateTestWithBuiltinRules {
         assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
         assert_eq!(true, plan.more_to_do());
 
-        let edge_idx = plan.find_work().unwrap();  // cat in
+        let edge_idx = plan.find_work().unwrap(); // cat in
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat mid1 mid2
+        let edge_idx = plan.find_work().unwrap(); // cat mid1 mid2
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
         assert_eq!(None, plan.find_work()); // done
@@ -1856,11 +1978,14 @@ struct PlanTest : public StateTestWithBuiltinRules {
     #[test]
     fn plantest_double_output_indirect() {
         let mut plantest = PlanTest::new();
-        plantest.assert_parse(concat!(
-            "build out: cat b1 b2\n",
-            "build b1: cat a1\n",
-            "build b2: cat a2\n",
-            "build a1 a2: cat in\n").as_bytes());
+        plantest.assert_parse(
+            concat!(
+                "build out: cat b1 b2\n",
+                "build b1: cat a1\n",
+                "build b2: cat a2\n",
+                "build a1 a2: cat in\n"
+            ).as_bytes(),
+        );
         plantest.assert_with_node_mut(b"a1", Node::mark_dirty);
         plantest.assert_with_node_mut(b"a2", Node::mark_dirty);
         plantest.assert_with_node_mut(b"b1", Node::mark_dirty);
@@ -1874,16 +1999,16 @@ struct PlanTest : public StateTestWithBuiltinRules {
         assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
         assert_eq!(true, plan.more_to_do());
 
-        let edge_idx = plan.find_work().unwrap();  // cat in
+        let edge_idx = plan.find_work().unwrap(); // cat in
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat a1
+        let edge_idx = plan.find_work().unwrap(); // cat a1
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat a2
+        let edge_idx = plan.find_work().unwrap(); // cat a2
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat b1 b2
+        let edge_idx = plan.find_work().unwrap(); // cat b1 b2
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
         assert_eq!(None, plan.find_work()); // done
@@ -1893,11 +2018,14 @@ struct PlanTest : public StateTestWithBuiltinRules {
     #[test]
     fn plantest_double_dependent() {
         let mut plantest = PlanTest::new();
-        plantest.assert_parse(concat!(
-            "build out: cat a1 a2\n",
-            "build a1: cat mid\n",
-            "build a2: cat mid\n",
-            "build mid: cat in\n").as_bytes());
+        plantest.assert_parse(
+            concat!(
+                "build out: cat a1 a2\n",
+                "build a1: cat mid\n",
+                "build a2: cat mid\n",
+                "build mid: cat in\n"
+            ).as_bytes(),
+        );
         plantest.assert_with_node_mut(b"mid", Node::mark_dirty);
         plantest.assert_with_node_mut(b"a1", Node::mark_dirty);
         plantest.assert_with_node_mut(b"a2", Node::mark_dirty);
@@ -1910,16 +2038,16 @@ struct PlanTest : public StateTestWithBuiltinRules {
         assert_eq!(Ok(true), plan.add_target(state, out_node_idx));
         assert_eq!(true, plan.more_to_do());
 
-        let edge_idx = plan.find_work().unwrap();  // cat in
+        let edge_idx = plan.find_work().unwrap(); // cat in
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat mid
+        let edge_idx = plan.find_work().unwrap(); // cat mid
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat mid
+        let edge_idx = plan.find_work().unwrap(); // cat mid
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
-        let edge_idx = plan.find_work().unwrap();  // cat a1 a2
+        let edge_idx = plan.find_work().unwrap(); // cat a1 a2
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
 
         assert_eq!(None, plan.find_work()); // done
@@ -1929,7 +2057,7 @@ struct PlanTest : public StateTestWithBuiltinRules {
         plantest.assert_parse(test_case);
         plantest.assert_with_node_mut(b"out1", Node::mark_dirty);
         plantest.assert_with_node_mut(b"out2", Node::mark_dirty);
-        
+
         let out1_node_idx = plantest.assert_node_idx(b"out1");
         let out2_node_idx = plantest.assert_node_idx(b"out2");
 
@@ -1951,7 +2079,7 @@ struct PlanTest : public StateTestWithBuiltinRules {
             let edge_out0_node = state.node_state.get_node(edge_out0_idx);
             assert_eq!(b"out1".as_ref(), edge_out0_node.path());
         }
-        
+
         // This will be false since poolcat is serialized
         assert!(plan.find_work().is_none());
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
@@ -1966,7 +2094,7 @@ struct PlanTest : public StateTestWithBuiltinRules {
             let edge_out0_node = state.node_state.get_node(edge_out0_idx);
             assert_eq!(b"out2".as_ref(), edge_out0_node.path());
         }
-        
+
         // This will be false since poolcat is serialized
         assert!(plan.find_work().is_none());
         plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
@@ -1978,41 +2106,56 @@ struct PlanTest : public StateTestWithBuiltinRules {
     #[test]
     fn plantest_pool_with_depth_one() {
         let mut plantest = PlanTest::new();
-        test_pool_with_depth_one_helper(&mut plantest, concat!(
-          "pool foobar\n",
-          "  depth = 1\n",
-          "rule poolcat\n",
-          "  command = cat $in > $out\n",
-          "  pool = foobar\n",
-          "build out1: poolcat in\n",
-          "build out2: poolcat in\n"          
-        ).as_bytes());
+        test_pool_with_depth_one_helper(
+            &mut plantest,
+            concat!(
+                "pool foobar\n",
+                "  depth = 1\n",
+                "rule poolcat\n",
+                "  command = cat $in > $out\n",
+                "  pool = foobar\n",
+                "build out1: poolcat in\n",
+                "build out2: poolcat in\n"
+            ).as_bytes(),
+        );
     }
 
     #[test]
     fn plantest_console_pool() {
         let mut plantest = PlanTest::new();
-        test_pool_with_depth_one_helper(&mut plantest, concat!(
+        test_pool_with_depth_one_helper(
+            &mut plantest,
+            concat!(
           "rule poolcat\n",
           "  command = cat $in > $out\n",
           "  pool = console\n",
           "build out1: poolcat in\n",
           "build out2: poolcat in\n",
-        ).as_bytes());
+        ).as_bytes(),
+        );
     }
 
     /// Because FindWork does not return Edges in any sort of predictable order,
     // provide a means to get available Edges in order and in a format which is
     // easy to write tests around.
-    fn find_work_sorted_helper(plan: &mut Plan, state: &State, count: usize) -> VecDeque<EdgeIndex> {
-        let mut result = (0..count).map(|i| {
-            assert!(plan.more_to_do());
-            plan.find_work().unwrap()
-        }).collect::<Vec<_>>();
+    fn find_work_sorted_helper(
+        plan: &mut Plan,
+        state: &State,
+        count: usize,
+    ) -> VecDeque<EdgeIndex> {
+        let mut result = (0..count)
+            .map(|i| {
+                assert!(plan.more_to_do());
+                plan.find_work().unwrap()
+            })
+            .collect::<Vec<_>>();
 
         assert!(plan.find_work().is_none());
         result.sort_by_key(|e| {
-            state.node_state.get_node(state.edge_state.get_edge(*e).outputs[0]).path()
+            state
+                .node_state
+                .get_node(state.edge_state.get_edge(*e).outputs[0])
+                .path()
         });
         result.into_iter().collect()
     }
@@ -2020,30 +2163,41 @@ struct PlanTest : public StateTestWithBuiltinRules {
     #[test]
     fn plantest_pools_with_depth_two() {
         let mut plantest = PlanTest::new();
-        plantest.assert_parse(concat!(
-            "pool foobar\n",
-            "  depth = 2\n",
-            "pool bazbin\n",
-            "  depth = 2\n",
-            "rule foocat\n",
-            "  command = cat $in > $out\n",
-            "  pool = foobar\n",
-            "rule bazcat\n",
-            "  command = cat $in > $out\n",
-            "  pool = bazbin\n",
-            "build out1: foocat in\n",
-            "build out2: foocat in\n",
-            "build out3: foocat in\n",
-            "build outb1: bazcat in\n",
-            "build outb2: bazcat in\n",
-            "build outb3: bazcat in\n",
-            "  pool =\n",
-            "build allTheThings: cat out1 out2 out3 outb1 outb2 outb3\n"
-        ).as_bytes());
-        [b"out1".as_ref(), b"out2".as_ref(), b"out3".as_ref(), b"outb1".as_ref(), b"outb2".as_ref(), b"outb3".as_ref(), b"allTheThings".as_ref()]
-            .as_ref().iter().for_each(|path| {
-            plantest.assert_with_node_mut(path, Node::mark_dirty);
-        });
+        plantest.assert_parse(
+            concat!(
+                "pool foobar\n",
+                "  depth = 2\n",
+                "pool bazbin\n",
+                "  depth = 2\n",
+                "rule foocat\n",
+                "  command = cat $in > $out\n",
+                "  pool = foobar\n",
+                "rule bazcat\n",
+                "  command = cat $in > $out\n",
+                "  pool = bazbin\n",
+                "build out1: foocat in\n",
+                "build out2: foocat in\n",
+                "build out3: foocat in\n",
+                "build outb1: bazcat in\n",
+                "build outb2: bazcat in\n",
+                "build outb3: bazcat in\n",
+                "  pool =\n",
+                "build allTheThings: cat out1 out2 out3 outb1 outb2 outb3\n"
+            ).as_bytes(),
+        );
+        [
+            b"out1".as_ref(),
+            b"out2".as_ref(),
+            b"out3".as_ref(),
+            b"outb1".as_ref(),
+            b"outb2".as_ref(),
+            b"outb3".as_ref(),
+            b"allTheThings".as_ref(),
+        ].as_ref()
+            .iter()
+            .for_each(|path| {
+                plantest.assert_with_node_mut(path, Node::mark_dirty);
+            });
 
         let mut state = plantest.state.borrow_mut();
         let state = &mut *state;
@@ -2055,32 +2209,62 @@ struct PlanTest : public StateTestWithBuiltinRules {
         {
             let edge_idx = edges[0];
             let edge = state.edge_state.get_edge(edge_idx);
-            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
-            assert_eq!(b"out1".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"in".as_ref(),
+                state.node_state.get_node(edge.inputs[0]).path()
+            );
+            assert_eq!(
+                b"out1".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         {
             let edge_idx = edges[1];
             let edge = state.edge_state.get_edge(edge_idx);
-            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
-            assert_eq!(b"out2".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"in".as_ref(),
+                state.node_state.get_node(edge.inputs[0]).path()
+            );
+            assert_eq!(
+                b"out2".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         {
             let edge_idx = edges[2];
             let edge = state.edge_state.get_edge(edge_idx);
-            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
-            assert_eq!(b"outb1".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"in".as_ref(),
+                state.node_state.get_node(edge.inputs[0]).path()
+            );
+            assert_eq!(
+                b"outb1".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         {
             let edge_idx = edges[3];
             let edge = state.edge_state.get_edge(edge_idx);
-            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
-            assert_eq!(b"outb2".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"in".as_ref(),
+                state.node_state.get_node(edge.inputs[0]).path()
+            );
+            assert_eq!(
+                b"outb2".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         {
             let edge_idx = edges[4];
             let edge = state.edge_state.get_edge(edge_idx);
-            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
-            assert_eq!(b"outb3".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"in".as_ref(),
+                state.node_state.get_node(edge.inputs[0]).path()
+            );
+            assert_eq!(
+                b"outb3".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         // finish out1
         plan.edge_finished(state, edges.pop_front().unwrap(), EdgeResult::EdgeSucceeded);
@@ -2088,13 +2272,19 @@ struct PlanTest : public StateTestWithBuiltinRules {
         let out3_idx = plan.find_work().unwrap();
         {
             let edge = state.edge_state.get_edge(out3_idx);
-            assert_eq!(b"in".as_ref(), state.node_state.get_node(edge.inputs[0]).path());
-            assert_eq!(b"out3".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"in".as_ref(),
+                state.node_state.get_node(edge.inputs[0]).path()
+            );
+            assert_eq!(
+                b"out3".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         assert!(plan.find_work().is_none());
         plan.edge_finished(state, out3_idx, EdgeResult::EdgeSucceeded);
         assert!(plan.find_work().is_none());
-        
+
         edges.into_iter().for_each(|edge_idx| {
             plan.edge_finished(state, edge_idx, EdgeResult::EdgeSucceeded);
         });
@@ -2102,14 +2292,17 @@ struct PlanTest : public StateTestWithBuiltinRules {
         let last_idx = plan.find_work().unwrap();
         {
             let edge = state.edge_state.get_edge(last_idx);
-            assert_eq!(b"allTheThings".as_ref(), state.node_state.get_node(edge.outputs[0]).path())
+            assert_eq!(
+                b"allTheThings".as_ref(),
+                state.node_state.get_node(edge.outputs[0]).path()
+            )
         }
         plan.edge_finished(state, last_idx, EdgeResult::EdgeSucceeded);
 
         assert_eq!(false, plan.more_to_do());
         assert_eq!(None, plan.find_work()); // done
     }
-/*
+    /*
 TEST_F(PlanTest, PoolWithRedundantEdges) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
     "pool compile\n"
@@ -2248,7 +2441,7 @@ struct FakeCommandRunner : public CommandRunner {
 };
 */
 
-/*
+    /*
 struct BuildTest : public StateTestWithBuiltinRules, public BuildLogUser {
   BuildTest() : config_(MakeConfig()), command_runner_(&fs_),
                 builder_(&state_, config_, NULL, NULL, &fs_),
@@ -4105,5 +4298,5 @@ TEST_F(BuildTest, Console) {
 
 */
 
-  
+
 }

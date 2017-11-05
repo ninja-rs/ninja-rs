@@ -32,7 +32,8 @@ use ninja::state::State;
 use ninja::graph::NodeIndex;
 use ninja::disk_interface::{DiskInterface, RealDiskInterface};
 use ninja::eval_env::Env;
-use ninja::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction, PhonyCycleAction};
+use ninja::manifest_parser::{ManifestParser, ManifestParserOptions, DupeEdgeAction,
+                             PhonyCycleAction};
 use ninja::version::NINJA_VERSION;
 
 /// Command-line options.
@@ -88,7 +89,7 @@ struct Tool<'a> {
     func: NinjaMainToolFunc,
 }
 
-type NinjaMainToolFunc = fn (&NinjaMain, &Options) -> Result<(), isize>;
+type NinjaMainToolFunc = fn(&NinjaMain, &Options) -> Result<(), isize>;
 
 struct NinjaMain<'a> {
     /// Command line used to run Ninja.
@@ -107,11 +108,11 @@ struct NinjaMain<'a> {
 
 impl<'a> NinjaMain<'a> {
     pub fn new(ninja_command: &'a Path, config: &'a BuildConfig) -> Self {
-        NinjaMain{
+        NinjaMain {
             ninja_command,
             config,
             state: State::new(),
-            disk_interface: RealDiskInterface{},
+            disk_interface: RealDiskInterface {},
             build_dir: Vec::new(),
             build_log: BuildLog::new(),
             deps_log: DepsLog::new(),
@@ -133,7 +134,8 @@ impl<'a> NinjaMain<'a> {
 
         if let Some(warn) = self.build_log.load(&log_path).map_err(|e| {
             error!("loading build log {}: {}", log_path.display(), e);
-        })? {
+        })?
+        {
             warning!("{}", warn);
         }
 
@@ -143,11 +145,13 @@ impl<'a> NinjaMain<'a> {
             })?;
             return Ok(());
         }
-        
+
         if !self.config.dry_run {
-            self.build_log.open_for_write(&log_path, self).map_err(|e| {
-                error!("opening build log: {}", e);
-            })?;
+            self.build_log.open_for_write(&log_path, self).map_err(
+                |e| {
+                    error!("opening build log: {}", e);
+                },
+            )?;
         }
 
         Ok(())
@@ -166,9 +170,12 @@ impl<'a> NinjaMain<'a> {
             error!("invalid utf-8 filename {}", String::from_utf8_lossy(&e));
         })?;
 
-        if let Some(warn) = self.deps_log.load(&log_path, &mut self.state).map_err(|e| {
-            error!("loading deps log {}: {}", log_path.display(), e);
-        })? {
+        if let Some(warn) = self.deps_log.load(&log_path, &mut self.state).map_err(
+            |e| {
+                error!("loading deps log {}: {}", log_path.display(), e);
+            },
+        )?
+        {
             warning!("{}", warn);
         }
 
@@ -178,7 +185,7 @@ impl<'a> NinjaMain<'a> {
             })?;
             return Ok(());
         }
-        
+
         if !self.config.dry_run {
             self.deps_log.open_for_write(&log_path).map_err(|e| {
                 error!("opening deps log: {}", e);
@@ -199,17 +206,22 @@ impl<'a> NinjaMain<'a> {
             let mut make_dir_bytes = self.build_dir.clone();
             make_dir_bytes.extend_from_slice(b"/.");
             let make_dir = pathbuf_from_bytes(make_dir_bytes).map_err(|e| {
-              error!("invalid utf8 pathname {}", String::from_utf8_lossy(&e));
+                error!("invalid utf8 pathname {}", String::from_utf8_lossy(&e));
             })?;
-            self.disk_interface.make_dirs(&make_dir).or_else(|e| {
-              if e.kind() == ErrorKind::AlreadyExists {
-                Ok(())
-              } else {
-                Err(e)
-              }
-            }).map_err(|e| {
-              error!("creating build directory {}: {}", String::from_utf8_lossy(&self.build_dir), e);
-            })?;
+            self.disk_interface
+                .make_dirs(&make_dir)
+                .or_else(|e| if e.kind() == ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(e)
+                })
+                .map_err(|e| {
+                    error!(
+                        "creating build directory {}: {}",
+                        String::from_utf8_lossy(&self.build_dir),
+                        e
+                    );
+                })?;
         }
         Ok(())
     }
@@ -228,8 +240,13 @@ impl<'a> NinjaMain<'a> {
         let node_idx = node_idx.unwrap();
 
         {
-            let mut builder = Builder::new(&mut self.state, &self.config, 
-                &self.build_log, &self.deps_log, &self.disk_interface);
+            let mut builder = Builder::new(
+                &mut self.state,
+                &self.config,
+                &self.build_log,
+                &self.deps_log,
+                &self.disk_interface,
+            );
 
             builder.add_target(node_idx)?;
 
@@ -243,10 +260,10 @@ impl<'a> NinjaMain<'a> {
         // The manifest was only rebuilt if it is now dirty (it may have been cleaned
         // by a restat).
         if !self.state.node_state.get_node(node_idx).is_dirty() {
-          // Reset the state to prevent problems like
-          // https://github.com/ninja-build/ninja/issues/874
-          self.state.reset();
-          return Ok(false);
+            // Reset the state to prevent problems like
+            // https://github.com/ninja-build/ninja/issues/874
+            self.state.reset();
+            return Ok(false);
         }
 
         return Ok(true);
@@ -257,7 +274,7 @@ impl<'a> NinjaMain<'a> {
     fn collect_target(&self, cpath: &[u8]) -> Result<NodeIndex, String> {
         let mut path = cpath.to_owned();
         let slash_bits = canonicalize_path(&mut path)?;
-        
+
         // Special syntax: "foo.cc^" means "the first output of foo.cc".
         let mut first_dependent = false;
         if path.last() == Some(&b'^') {
@@ -266,39 +283,53 @@ impl<'a> NinjaMain<'a> {
         }
 
         match self.state.node_state.lookup_node(&path) {
-          None => {
-              let mut err = format!("unknown target '{}'", 
-                  String::from_utf8_lossy(&decanonicalize_path(&path, slash_bits)));
-              if &path == b"clean" {
-                  err += ", did you mean 'ninja -t clean'?";
-              } else if &path == b"help" {
-                  err += ", did you mean 'ninja -h'?";
-              } else if let Some(suggestion) = self.state.spellcheck_node(&path) {
-                  err += &format!(", did you mean '{}'?", String::from_utf8_lossy(suggestion));
-              };
-              return Err(err);
-          },
-          Some(node_idx) => {
-              if first_dependent {
-                  let out_edge_idx = self.state.node_state.get_node(node_idx)
-                        .out_edges().first().cloned().ok_or_else(|| {
-                          format!("'{}' has no out edge", String::from_utf8_lossy(&path))})?;
-                  let output_node_idx = self.state.edge_state.get_edge(out_edge_idx)
-                        .outputs.first().cloned();
-                  let output_node_idx = output_node_idx.ok_or_else(|| {
-                      self.state.edge_state.get_edge(out_edge_idx).dump();
-                      format!("edge has no outputs")
-                  })?;
-                  return Ok(output_node_idx);
-              }
-              return Ok(node_idx);
-          }
+            None => {
+                let mut err = format!(
+                    "unknown target '{}'",
+                    String::from_utf8_lossy(&decanonicalize_path(&path, slash_bits))
+                );
+                if &path == b"clean" {
+                    err += ", did you mean 'ninja -t clean'?";
+                } else if &path == b"help" {
+                    err += ", did you mean 'ninja -h'?";
+                } else if let Some(suggestion) = self.state.spellcheck_node(&path) {
+                    err += &format!(", did you mean '{}'?", String::from_utf8_lossy(suggestion));
+                };
+                return Err(err);
+            }
+            Some(node_idx) => {
+                if first_dependent {
+                    let out_edge_idx = self.state
+                        .node_state
+                        .get_node(node_idx)
+                        .out_edges()
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!("'{}' has no out edge", String::from_utf8_lossy(&path))
+                        })?;
+                    let output_node_idx = self.state
+                        .edge_state
+                        .get_edge(out_edge_idx)
+                        .outputs
+                        .first()
+                        .cloned();
+                    let output_node_idx = output_node_idx.ok_or_else(|| {
+                        self.state.edge_state.get_edge(out_edge_idx).dump();
+                        format!("edge has no outputs")
+                    })?;
+                    return Ok(output_node_idx);
+                }
+                return Ok(node_idx);
+            }
         }
     }
 
     /// CollectTarget for all command-line arguments, filling in \a targets.
-    fn collect_targets_from_args(&self, args: ArgMatches<'static>) 
-            -> Result<Vec<NodeIndex>, String> {
+    fn collect_targets_from_args(
+        &self,
+        args: ArgMatches<'static>,
+    ) -> Result<Vec<NodeIndex>, String> {
         if let Some(inputs_value) = args.values_of_lossy("TARGET") {
             let mut result = Vec::new();
             for input_value in inputs_value.into_iter().map(String::into_bytes) {
@@ -321,13 +352,18 @@ impl<'a> NinjaMain<'a> {
 
         self.disk_interface.allow_stat_cache(EXPERIMENTAL_STATCACHE);
 
-        let mut builder = Builder::new(&mut self.state, &self.config, 
-            &self.build_log, &self.deps_log, &self.disk_interface);
+        let mut builder = Builder::new(
+            &mut self.state,
+            &self.config,
+            &self.build_log,
+            &self.deps_log,
+            &self.disk_interface,
+        );
 
         for target in targets.into_iter() {
             let _ = builder.add_target(target).map_err(|e| {
-              error!("{}", e);
-              return 1isize;
+                error!("{}", e);
+                return 1isize;
             })?;
             // If _ is false, it's adding a target that is already up-to-date; not really
             // an error.
@@ -518,50 +554,114 @@ fn guess_parallelism() -> usize {
     match get_processor_count() {
         0 | 1 => 2,
         2 => 3,
-        p => p + 2
+        p => p + 2,
     }
 }
 
 /// Parse argv for command-line options.
 /// Returns an exit code, or -1 if Ninja should continue.
-fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatches<'static>, isize> {
+fn read_flags(
+    options: &mut Options,
+    config: &mut BuildConfig,
+) -> Result<ArgMatches<'static>, isize> {
     // let helpstring_version = format!("print ninja version (\"{}\")", NINJA_VERSION);
     lazy_static! {
         static ref GUESSED_PARALLELISM : usize = guess_parallelism();
         static ref DEFAULT_PARALLELISM : String = GUESSED_PARALLELISM.to_string();
     }
-    let helpstring_parallelism = format!("run N jobs in parallel [default={}, derived from CPUs available]", &GUESSED_PARALLELISM as &usize);
+    let helpstring_parallelism = format!(
+        "run N jobs in parallel [default={}, derived from CPUs available]",
+        &GUESSED_PARALLELISM as &usize
+    );
     let app = App::new("ninja")
         .version(NINJA_VERSION)
         .setting(AppSettings::DisableHelpSubcommand)
         .setting(AppSettings::DeriveDisplayOrder)
         .setting(AppSettings::UnifiedHelpMessage)
-        .arg(Arg::with_name("cwd").short("C").takes_value(true).value_name("DIR")
-            .help("change to DIR before doing anything else"))
-        .arg(Arg::with_name("input_file").short("f").takes_value(true).value_name("FILE")
-            .default_value("build.ninja").help("specify input build file"))
-        .arg(Arg::with_name("parallelism").short("j").takes_value(true).value_name("N")
-            .default_value(&DEFAULT_PARALLELISM).help(&helpstring_parallelism).hide_default_value(true))
-        .arg(Arg::with_name("failures_allowed").short("k").takes_value(true).value_name("N")
-            .default_value("1").help("keep going until N jobs fail"))
-        .arg(Arg::with_name("load_average_limit").short("l").takes_value(true).value_name("N")
-            .help("do not start new jobs if the load average is greater than N"))        
-        .arg(Arg::with_name("dry_run").short("n")
-            .help("dry run (don't run commands but act like they succeeded)"))        
-        .arg(Arg::with_name("verbose").short("v")
-            .help("show all command lines while building"))
-        .arg(Arg::with_name("debug_mode").short("d").takes_value(true).value_name("MODE")
-            .help("enable debugging (use -d list to list modes)"))
-        .arg(Arg::with_name("warning").short("w").takes_value(true).value_name("FLAG")
-            .help("adjust warnings (use -w list to list warnings)"))
-        .arg(Arg::with_name("targets").multiple(true).value_name("TARGETS")
-            .help("if targets are unspecified, builds the 'default' target (see manual)."))
-        .subcommand(SubCommand::with_name("-t")
-            .setting(AppSettings::TrailingVarArg)
-            .help("run a subtool (use -t list to list subtools)\nterminates toplevel options; further flags are passed to the tool")
-            .arg(Arg::with_name("tool").multiple(true).value_name("TOOL").required(true)
-                .help("tool and its arguments.")))
-        ;
+        .arg(
+            Arg::with_name("cwd")
+                .short("C")
+                .takes_value(true)
+                .value_name("DIR")
+                .help("change to DIR before doing anything else"),
+        )
+        .arg(
+            Arg::with_name("input_file")
+                .short("f")
+                .takes_value(true)
+                .value_name("FILE")
+                .default_value("build.ninja")
+                .help("specify input build file"),
+        )
+        .arg(
+            Arg::with_name("parallelism")
+                .short("j")
+                .takes_value(true)
+                .value_name("N")
+                .default_value(&DEFAULT_PARALLELISM)
+                .help(&helpstring_parallelism)
+                .hide_default_value(true),
+        )
+        .arg(
+            Arg::with_name("failures_allowed")
+                .short("k")
+                .takes_value(true)
+                .value_name("N")
+                .default_value("1")
+                .help("keep going until N jobs fail"),
+        )
+        .arg(
+            Arg::with_name("load_average_limit")
+                .short("l")
+                .takes_value(true)
+                .value_name("N")
+                .help(
+                    "do not start new jobs if the load average is greater than N",
+                ),
+        )
+        .arg(Arg::with_name("dry_run").short("n").help(
+            "dry run (don't run commands but act like they succeeded)",
+        ))
+        .arg(Arg::with_name("verbose").short("v").help(
+            "show all command lines while building",
+        ))
+        .arg(
+            Arg::with_name("debug_mode")
+                .short("d")
+                .takes_value(true)
+                .value_name("MODE")
+                .help("enable debugging (use -d list to list modes)"),
+        )
+        .arg(
+            Arg::with_name("warning")
+                .short("w")
+                .takes_value(true)
+                .value_name("FLAG")
+                .help("adjust warnings (use -w list to list warnings)"),
+        )
+        .arg(
+            Arg::with_name("targets")
+                .multiple(true)
+                .value_name("TARGETS")
+                .help(
+                    "if targets are unspecified, builds the 'default' target (see manual).",
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("-t")
+                .setting(AppSettings::TrailingVarArg)
+                .help(concat!(
+                    "run a subtool (use -t list to list subtools)\n",
+                    "terminates toplevel options; further flags are passed to the tool"
+                ))
+                .arg(
+                    Arg::with_name("tool")
+                        .multiple(true)
+                        .value_name("TOOL")
+                        .required(true)
+                        .help("tool and its arguments."),
+                ),
+        );
     let matches = app.get_matches();
     if let Some(debug_mode) = matches.value_of("debug_mode") {
         debug_enable(debug_mode)?;
@@ -572,9 +672,10 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
     }
 
     if let Some(parallelism) = matches.value_of("parallelism") {
-        let parallelism = parallelism.parse::<isize>()
+        let parallelism = parallelism
+            .parse::<isize>()
             .map_err(|_| 1isize)
-            .and_then(|p| if p > 0 {Ok(p)} else {Err(1isize)})
+            .and_then(|p| if p > 0 { Ok(p) } else { Err(1isize) })
             .unwrap_or_else(|_| {
                 fatal!("invalid -j parameter");
             });
@@ -584,8 +685,9 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
     if let Some(failures_allowed) = matches.value_of("failures_allowed") {
         // We want to go until N jobs fail, which means we should allow
         // N failures and then stop.  For N <= 0, INT_MAX is close enough
-        // to infinite for most sane builds.        
-        let failures_allowed = failures_allowed.parse::<isize>()
+        // to infinite for most sane builds.
+        let failures_allowed = failures_allowed
+            .parse::<isize>()
             .map(|v| if v > 0 { v as usize } else { std::usize::MAX })
             .unwrap_or_else(|_| {
                 fatal!("-k parameter not numeric; did you mean -k 0?");
@@ -596,11 +698,10 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
     if let Some(load_average_limit) = matches.value_of("load_average_limit") {
         // We want to go until N jobs fail, which means we should allow
         // N failures and then stop.  For N <= 0, INT_MAX is close enough
-        // to infinite for most sane builds.        
-        let load_average_limit = load_average_limit.parse::<f64>()
-            .unwrap_or_else(|e| {
-                fatal!("-l parameter not numeric: did you mean -l 0.0?");
-            });
+        // to infinite for most sane builds.
+        let load_average_limit = load_average_limit.parse::<f64>().unwrap_or_else(|e| {
+            fatal!("-l parameter not numeric: did you mean -l 0.0?");
+        });
         config.max_load_average = load_average_limit;
     }
 
@@ -621,12 +722,12 @@ fn read_flags(options: &mut Options, config: &mut BuildConfig) -> Result<ArgMatc
     }
 
     if let Some(sub_matches) = matches.subcommand_matches("-t") {
-        let mut subcommand : Vec<&str> = Vec::new();
+        let mut subcommand: Vec<&str> = Vec::new();
         if let Some(args) = sub_matches.values_of("tool") {
             subcommand = args.collect();
         }
         options.tool = Some(choose_tool(&subcommand).map_err(|_| 0isize)?);
-        return Ok(sub_matches.clone())
+        return Ok(sub_matches.clone());
     }
     return Ok(matches);
 }
@@ -637,8 +738,10 @@ pub fn ninja_entry() -> Result<(), isize> {
     options.input_file = "build.ninja".into();
 
     set_stdout_linebuffered();
-    let ninja_command: PathBuf = 
-        std::env::args_os().next().map(Into::into).unwrap_or_default();
+    let ninja_command: PathBuf = std::env::args_os()
+        .next()
+        .map(Into::into)
+        .unwrap_or_default();
 
     let args = read_flags(&mut options, &mut config)?;
     if let Some(working_dir) = options.working_dir.as_ref() {
@@ -674,14 +777,14 @@ pub fn ninja_entry() -> Result<(), isize> {
         }
 
         {
-          let mut parser = ManifestParser::new(&mut ninja.state, &ninja.disk_interface, parser_opts);
-          parser.load(&options.input_file)
-              .map_err(|err| {
-                  error!("{}", &err);
-                  return 1isize;
-              })?;
+            let mut parser =
+                ManifestParser::new(&mut ninja.state, &ninja.disk_interface, parser_opts);
+            parser.load(&options.input_file).map_err(|err| {
+                error!("{}", &err);
+                return 1isize;
+            })?;
         }
-        
+
         if Some(ToolRunAfter::RunAfterLoad) == (options.tool.as_ref().map(|tool| tool.when)) {
             let tool_func = options.tool.as_ref().unwrap().func.clone();
             return tool_func(&ninja, &options);
@@ -715,14 +818,17 @@ pub fn ninja_entry() -> Result<(), isize> {
         }
         let result = ninja.run_build(args);
         if METRICS.is_some() {
-            ninja.dump_metrics(); 
+            ninja.dump_metrics();
         }
 
         return result;
     }
 
-    error!("manifest '{:?}' still dirty after {} tries\n",
-      options.input_file, CYCLE_LIMIT);
+    error!(
+        "manifest '{:?}' still dirty after {} tries\n",
+        options.input_file,
+        CYCLE_LIMIT
+    );
     return Err(1);
 }
 

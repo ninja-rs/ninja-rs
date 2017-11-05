@@ -138,7 +138,7 @@ impl Node {
     pub fn set_in_edge(&mut self, edge: Option<EdgeIndex>) {
         self.in_edge = edge;
     }
-    
+
     pub fn out_edges(&self) -> &[EdgeIndex] {
         &self.out_edges
     }
@@ -186,9 +186,9 @@ private:
 
 #[derive(Clone, Copy)]
 pub enum EdgeVisitMark {
-  VisitNone,
-  VisitInStack,
-  VisitDone
+    VisitNone,
+    VisitInStack,
+    VisitDone,
 }
 
 /// An edge in the dependency graph; links between Nodes using Rules.
@@ -209,17 +209,17 @@ pub struct Edge {
 impl Edge {
     pub fn new(rule: Rc<Rule>, pool: Rc<RefCell<Pool>>, env: Rc<RefCell<BindingEnv>>) -> Self {
         Edge {
-          rule,
-          pool,
-          inputs: Vec::new(),
-          outputs: Vec::new(),
-          env,
-          mark: EdgeVisitMark::VisitNone,
-          outputs_ready: false,
-          deps_missing: false,
-          implicit_deps: 0,
-          order_only_deps: 0,
-          implicit_outs: 0
+            rule,
+            pool,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            env,
+            mark: EdgeVisitMark::VisitNone,
+            outputs_ready: false,
+            deps_missing: false,
+            implicit_deps: 0,
+            order_only_deps: 0,
+            implicit_outs: 0,
         }
     }
 
@@ -231,14 +231,14 @@ impl Edge {
         &self.pool
     }
 
-    pub fn weight(&self) -> usize { 
-        1 
+    pub fn weight(&self) -> usize {
+        1
     }
 
-    pub fn outputs_ready(&self) -> bool { 
+    pub fn outputs_ready(&self) -> bool {
         self.outputs_ready
     }
-    
+
     // There are three types of inputs.
     // 1) explicit deps, which show up as $in on the command line;
     // 2) implicit deps, which the target depends on implicitly (e.g. C headers),
@@ -253,7 +253,7 @@ impl Edge {
 
     pub fn implicit_deps_range(&self) -> Range<usize> {
         (self.inputs.len() - self.implicit_deps - self.order_only_deps)..
-        (self.inputs.len() - self.order_only_deps)
+            (self.inputs.len() - self.order_only_deps)
     }
 
     pub fn non_order_only_deps_range(&self) -> Range<usize> {
@@ -300,13 +300,11 @@ impl Edge {
     }
 
     pub fn is_phony(&self) -> bool {
-        self.rule.as_ref() as * const Rule == 
-          PHONY_RULE.with(|x| x.as_ref() as * const Rule)
+        self.rule.as_ref() as *const Rule == PHONY_RULE.with(|x| x.as_ref() as *const Rule)
     }
 
     pub fn use_console(&self) -> bool {
-        &*self.pool().borrow() as * const Pool ==
-          CONSOLE_POOL.with(|x| &*x.borrow() as * const Pool)
+        &*self.pool().borrow() as *const Pool == CONSOLE_POOL.with(|x| &*x.borrow() as *const Pool)
     }
 
     /// Expand all variables in a command and return it as a string.
@@ -316,7 +314,11 @@ impl Edge {
         self.evaluate_command_with_rsp_file(node_state, false)
     }
 
-    pub fn evaluate_command_with_rsp_file(&self, node_state: &NodeState, incl_rsp_file: bool) -> Vec<u8> {
+    pub fn evaluate_command_with_rsp_file(
+        &self,
+        node_state: &NodeState,
+        incl_rsp_file: bool,
+    ) -> Vec<u8> {
         let mut command = self.get_binding(node_state, b"command").into_owned();
         if incl_rsp_file {
             let rspfile_content = self.get_binding(node_state, b"rspfile_content");
@@ -332,8 +334,8 @@ impl Edge {
         // CMake 2.8.12.x and 3.0.x produced self-referencing phony rules
         // of the form "build a: phony ... a ...".   Restrict our
         // "phonycycle" diagnostic option to the form it used.
-        self.is_phony() && self.outputs.len() == 1 && 
-          self.implicit_outs == 0 && self.implicit_deps == 0
+        self.is_phony() && self.outputs.len() == 1 && self.implicit_outs == 0 &&
+            self.implicit_deps == 0
     }
 
     /// Return true if all inputs' in-edges are ready.
@@ -403,7 +405,12 @@ impl<'b, 'c> ImplicitDepLoader<'b, 'c> {
 
     /// Load implicit dependencies for \a edge from a depfile attribute.
     /// @return false on error (without filling \a err if info is just missing).
-    pub fn load_dep_file(&self, state: &State, edge_idx: EdgeIndex, path: &[u8]) -> Result<bool, String> {
+    pub fn load_dep_file(
+        &self,
+        state: &State,
+        edge_idx: EdgeIndex,
+        path: &[u8],
+    ) -> Result<bool, String> {
         unimplemented!{}
     }
 
@@ -413,7 +420,6 @@ impl<'b, 'c> ImplicitDepLoader<'b, 'c> {
         return Ok(false);
         unimplemented!{}
     }
-
 }
 
 /*
@@ -451,20 +457,30 @@ struct ImplicitDepLoader {
 
 /// DependencyScan manages the process of scanning the files in a graph
 /// and updating the dirty/outputs_ready state of all the nodes and edges.
-pub struct DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
+pub struct DependencyScan<'s, 'a, 'b, 'c>
+where
+    's: 'a,
+{
     build_log: Option<&'a BuildLog<'s>>,
     deps_log: &'b DepsLog,
     disk_interface: &'c DiskInterface,
-    dep_loader: ImplicitDepLoader<'b, 'c>
+    dep_loader: ImplicitDepLoader<'b, 'c>,
 }
 
-impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
-    pub fn new(build_log: &'a BuildLog<'s>, deps_log: &'b DepsLog, disk_interface: &'c DiskInterface) -> Self {
+impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c>
+where
+    's: 'a,
+{
+    pub fn new(
+        build_log: &'a BuildLog<'s>,
+        deps_log: &'b DepsLog,
+        disk_interface: &'c DiskInterface,
+    ) -> Self {
         DependencyScan {
             build_log: Some(build_log),
             deps_log,
             disk_interface,
-            dep_loader: ImplicitDepLoader::new(deps_log, disk_interface)
+            dep_loader: ImplicitDepLoader::new(deps_log, disk_interface),
         }
     }
 
@@ -486,135 +502,162 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
         return self.recompute_dirty_inner(state, node_idx, &mut stack);
     }
 
-    fn recompute_dirty_inner(&self, state: &mut State, node_idx: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {        
+    fn recompute_dirty_inner(
+        &self,
+        state: &mut State,
+        node_idx: NodeIndex,
+        stack: &mut Vec<NodeIndex>,
+    ) -> Result<(), String> {
         match state.node_state.get_node(node_idx).in_edge.as_ref() {
-          None => {
-              let node = state.node_state.get_node_mut(node_idx);
-              // If we already visited this leaf node then we are done.
-              if node.status_known() {
-                  return Ok(());
-              };
-              // This node has no in-edge; it is dirty if it is missing.
-              node.stat_if_necessary(self.disk_interface)?;
-              if !node.exists() {
-                  explain!("{} has no in-edge and is missing", String::from_utf8_lossy(node.path()));
-              }
-              let dirty = !node.exists();
-              node.set_dirty(dirty);
-              Ok(())
-          },
-          Some(&edge_idx) => {
-              // If we already finished this edge then we are done.
-              match state.edge_state.get_edge(edge_idx).mark {
-                  EdgeVisitMark::VisitDone => {return Ok(());},
-                  _ => {},
-              };
+            None => {
+                let node = state.node_state.get_node_mut(node_idx);
+                // If we already visited this leaf node then we are done.
+                if node.status_known() {
+                    return Ok(());
+                };
+                // This node has no in-edge; it is dirty if it is missing.
+                node.stat_if_necessary(self.disk_interface)?;
+                if !node.exists() {
+                    explain!(
+                        "{} has no in-edge and is missing",
+                        String::from_utf8_lossy(node.path())
+                    );
+                }
+                let dirty = !node.exists();
+                node.set_dirty(dirty);
+                Ok(())
+            }
+            Some(&edge_idx) => {
+                // If we already finished this edge then we are done.
+                match state.edge_state.get_edge(edge_idx).mark {
+                    EdgeVisitMark::VisitDone => {
+                        return Ok(());
+                    }
+                    _ => {}
+                };
 
-              // If we encountered this edge earlier in the call stack we have a cycle.
-              self.verify_dag(state, node_idx, stack)?;
+                // If we encountered this edge earlier in the call stack we have a cycle.
+                self.verify_dag(state, node_idx, stack)?;
 
-              let mut dirty = false;
-              let mut outputs_ready = true;
-              let mut deps_missing = false;
-              
-              // Mark the edge temporarily while in the call stack.
-              state.edge_state.get_edge_mut(edge_idx).mark = EdgeVisitMark::VisitInStack;
+                let mut dirty = false;
+                let mut outputs_ready = true;
+                let mut deps_missing = false;
 
-              stack.push(node_idx);
-              // Load output mtimes so we can compare them to the most recent input below.
-              for o_idx in state.edge_state.get_edge(edge_idx).outputs.iter().cloned() {
-                  state.node_state.get_node_mut(o_idx).stat_if_necessary(self.disk_interface)?;
-              };
+                // Mark the edge temporarily while in the call stack.
+                state.edge_state.get_edge_mut(edge_idx).mark = EdgeVisitMark::VisitInStack;
 
-              if !self.dep_loader.load_deps(state, edge_idx)? {
-                  // Failed to load dependency info: rebuild to regenerate it.
-                  // LoadDeps() did EXPLAIN() already, no need to do it here.
-                  dirty = true;
-                  deps_missing = true;
-              }
+                stack.push(node_idx);
+                // Load output mtimes so we can compare them to the most recent input below.
+                for o_idx in state.edge_state.get_edge(edge_idx).outputs.iter().cloned() {
+                    state.node_state.get_node_mut(o_idx).stat_if_necessary(
+                        self.disk_interface,
+                    )?;
+                }
 
-              let mut most_recent_input = None;
-              {
-                  let (order_only_range, inputs) = {
-                      let edge = state.edge_state.get_edge(edge_idx);
-                      (edge.order_only_deps_range(), edge.inputs.clone())
-                  };
-                  
-                  for (i, i_idx) in inputs.into_iter().enumerate() {
-                      // Visit this input.
-                      self.recompute_dirty_inner(state, i_idx, stack)?;
+                if !self.dep_loader.load_deps(state, edge_idx)? {
+                    // Failed to load dependency info: rebuild to regenerate it.
+                    // LoadDeps() did EXPLAIN() already, no need to do it here.
+                    dirty = true;
+                    deps_missing = true;
+                }
 
-                      // If an input is not ready, neither are our outputs.
-                      if let Some(in_edge) = state.node_state.get_node(i_idx).in_edge() {
-                          if !state.edge_state.get_edge(in_edge).outputs_ready {
-                              outputs_ready = false;
-                          }
-                      }
+                let mut most_recent_input = None;
+                {
+                    let (order_only_range, inputs) = {
+                        let edge = state.edge_state.get_edge(edge_idx);
+                        (edge.order_only_deps_range(), edge.inputs.clone())
+                    };
 
-                      if !order_only_range.contains_stable(i) {
-                          // If a regular input is dirty (or missing), we're dirty.
-                          // Otherwise consider mtime.
-                          let i_node = state.node_state.get_node(i_idx);
-                          if i_node.is_dirty() {
-                              explain!("{} is dirty", String::from_utf8_lossy(i_node.path()));
-                              dirty = true;
-                          } else {
-                              if most_recent_input.as_ref().map(|&prev_idx| {
-                                 let prev_node = state.node_state.get_node(prev_idx);
-                                 i_node.mtime() > prev_node.mtime()
-                              }).unwrap_or(true) {
-                                 most_recent_input = Some(i_idx);
-                              }
-                          }
-                      }
-                  }
-              }
-              // We may also be dirty due to output state: missing outputs, out of
-              // date outputs, etc.  Visit all outputs and determine whether they're dirty.
-              if !dirty {
-                  dirty = self.recompute_outputs_dirty(state, edge_idx, most_recent_input)?;
-              }
+                    for (i, i_idx) in inputs.into_iter().enumerate() {
+                        // Visit this input.
+                        self.recompute_dirty_inner(state, i_idx, stack)?;
 
-              if dirty {
-                  let edge = state.edge_state.get_edge(edge_idx);
+                        // If an input is not ready, neither are our outputs.
+                        if let Some(in_edge) = state.node_state.get_node(i_idx).in_edge() {
+                            if !state.edge_state.get_edge(in_edge).outputs_ready {
+                                outputs_ready = false;
+                            }
+                        }
 
-                  // Finally, visit each output and update their dirty state if necessary.
-                  for o_idx in edge.outputs.iter().cloned() {
-                      state.node_state.get_node_mut(o_idx).mark_dirty();
-                  }
+                        if !order_only_range.contains_stable(i) {
+                            // If a regular input is dirty (or missing), we're dirty.
+                            // Otherwise consider mtime.
+                            let i_node = state.node_state.get_node(i_idx);
+                            if i_node.is_dirty() {
+                                explain!("{} is dirty", String::from_utf8_lossy(i_node.path()));
+                                dirty = true;
+                            } else {
+                                if most_recent_input
+                                    .as_ref()
+                                    .map(|&prev_idx| {
+                                        let prev_node = state.node_state.get_node(prev_idx);
+                                        i_node.mtime() > prev_node.mtime()
+                                    })
+                                    .unwrap_or(true)
+                                {
+                                    most_recent_input = Some(i_idx);
+                                }
+                            }
+                        }
+                    }
+                }
+                // We may also be dirty due to output state: missing outputs, out of
+                // date outputs, etc.  Visit all outputs and determine whether they're dirty.
+                if !dirty {
+                    dirty = self.recompute_outputs_dirty(
+                        state,
+                        edge_idx,
+                        most_recent_input,
+                    )?;
+                }
 
-                  // If an edge is dirty, its outputs are normally not ready.  (It's
-                  // possible to be clean but still not be ready in the presence of
-                  // order-only inputs.)
-                  // But phony edges with no inputs have nothing to do, so are always
-                  // ready.
+                if dirty {
+                    let edge = state.edge_state.get_edge(edge_idx);
 
-                  if !(edge.is_phony() && edge.inputs.is_empty()) {
-                      outputs_ready = false;
-                  }
-              }
+                    // Finally, visit each output and update their dirty state if necessary.
+                    for o_idx in edge.outputs.iter().cloned() {
+                        state.node_state.get_node_mut(o_idx).mark_dirty();
+                    }
 
-              let edge = state.edge_state.get_edge_mut(edge_idx);
-              edge.deps_missing = deps_missing;
-              edge.outputs_ready = outputs_ready;
+                    // If an edge is dirty, its outputs are normally not ready.  (It's
+                    // possible to be clean but still not be ready in the presence of
+                    // order-only inputs.)
+                    // But phony edges with no inputs have nothing to do, so are always
+                    // ready.
 
-              // Mark the edge as finished during this walk now that it will no longer
-              // be in the call stack.
-              edge.mark = EdgeVisitMark::VisitDone;
-              debug_assert!(stack.last() == Some(&node_idx));
-              stack.pop();
-              Ok(())
-          },
+                    if !(edge.is_phony() && edge.inputs.is_empty()) {
+                        outputs_ready = false;
+                    }
+                }
+
+                let edge = state.edge_state.get_edge_mut(edge_idx);
+                edge.deps_missing = deps_missing;
+                edge.outputs_ready = outputs_ready;
+
+                // Mark the edge as finished during this walk now that it will no longer
+                // be in the call stack.
+                edge.mark = EdgeVisitMark::VisitDone;
+                debug_assert!(stack.last() == Some(&node_idx));
+                stack.pop();
+                Ok(())
+            }
         }
     }
 
-    fn verify_dag(&self, state: &State, node_idx: NodeIndex, stack: &mut Vec<NodeIndex>) -> Result<(), String> {
+    fn verify_dag(
+        &self,
+        state: &State,
+        node_idx: NodeIndex,
+        stack: &mut Vec<NodeIndex>,
+    ) -> Result<(), String> {
         let edge_idx = state.node_state.get_node(node_idx).in_edge().unwrap();
 
         // If we have no temporary mark on the edge then we do not yet have a cycle.
         match state.edge_state.get_edge(edge_idx).mark {
-          EdgeVisitMark::VisitInStack => {},
-          _ => {return Ok(());}
+            EdgeVisitMark::VisitInStack => {}
+            _ => {
+                return Ok(());
+            }
         };
 
         // We have this edge earlier in the call stack.  Find it.
@@ -645,7 +688,12 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
 
         err += String::from_utf8_lossy(state.node_state.get_node(node_idx).path()).as_ref();
 
-        if start + 1 == stack.len() && state.edge_state.get_edge(edge_idx).maybe_phonycycle_diagnostic() {
+        if start + 1 == stack.len() &&
+            state
+                .edge_state
+                .get_edge(edge_idx)
+                .maybe_phonycycle_diagnostic()
+        {
             // The manifest parser would have filtered out the self-referencing
             // input if it were not configured to allow the error.
             err += " [-w phonycycle=err]";
@@ -656,7 +704,12 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
 
     /// Recompute whether any output of the edge is dirty, if so sets |*dirty|.
     /// Returns false on failure.
-    fn recompute_outputs_dirty(&self, state: &State, edge_idx: EdgeIndex, most_recent_input: Option<NodeIndex>) -> Result<bool, String> {
+    fn recompute_outputs_dirty(
+        &self,
+        state: &State,
+        edge_idx: EdgeIndex,
+        most_recent_input: Option<NodeIndex>,
+    ) -> Result<bool, String> {
         let edge = state.edge_state.get_edge(edge_idx);
         let command = edge.evaluate_command_with_rsp_file(&state.node_state, true);
         for output in edge.outputs.iter() {
@@ -669,9 +722,15 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
 
     /// Recompute whether a given single output should be marked dirty.
     /// Returns true if so.
-    fn recompute_output_dirty(&self, state: &State, edge_idx: EdgeIndex, most_recent_input: Option<NodeIndex>,
-        command: &[u8], output_node_idx: NodeIndex) -> bool {
-    
+    fn recompute_output_dirty(
+        &self,
+        state: &State,
+        edge_idx: EdgeIndex,
+        most_recent_input: Option<NodeIndex>,
+        command: &[u8],
+        output_node_idx: NodeIndex,
+    ) -> bool {
+
         let edge = state.edge_state.get_edge(edge_idx);
         let output = state.node_state.get_node(output_node_idx);
         let mut entry = None;
@@ -680,17 +739,22 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
             // Phony edges don't write any output.  Outputs are only dirty if
             // there are no inputs and we're missing the output.
             if edge.inputs.is_empty() && !output.exists() {
-                explain!("output {} of phony edge with no inputs doesn't exist",
-                    String::from_utf8_lossy(output.path()));
-                
+                explain!(
+                    "output {} of phony edge with no inputs doesn't exist",
+                    String::from_utf8_lossy(output.path())
+                );
+
                 return true;
             }
-            return false;   
+            return false;
         }
 
         // Dirty if we're missing the output.
         if !output.exists() {
-            explain!("output {} doesn't exist", String::from_utf8_lossy(output.path()));
+            explain!(
+                "output {} doesn't exist",
+                String::from_utf8_lossy(output.path())
+            );
             return true;
         }
 
@@ -720,12 +784,14 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
 
 
                 if output_mtime < most_recent_input.mtime() {
-                    explain!("{}output {} older than most recent input {} ({} vs {})",
+                    explain!(
+                        "{}output {} older than most recent input {} ({} vs {})",
                         if used_restat { "restat of " } else { "" },
                         String::from_utf8_lossy(output.path()),
                         String::from_utf8_lossy(most_recent_input.path()),
                         output_mtime,
-                        most_recent_input.mtime);
+                        most_recent_input.mtime
+                    );
                     return true;
                 }
             }
@@ -738,7 +804,7 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
             }
             if let Some(found_entry) = entry {
                 unimplemented!()
-/*
+                /*
       if (!generator &&
           BuildLog::LogEntry::HashCommand(command) != entry->command_hash) {
         // May also be dirty due to the command changing since the last build.
@@ -761,7 +827,10 @@ impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
             }
 
             if entry.is_none() && !generator {
-                explain!("command line not found in log for {}", String::from_utf8_lossy(output.path()));
+                explain!(
+                    "command line not found in log for {}",
+                    String::from_utf8_lossy(output.path())
+                );
                 return true;
             }
         }
@@ -835,18 +904,22 @@ struct EdgeEnv<'a, 'b> {
 impl<'a, 'b> EdgeEnv<'a, 'b> {
     pub fn new(edge: &'a Edge, node_state: &'b NodeState, escape: EdgeEnvEscapeKind) -> Self {
         EdgeEnv {
-          lookups: RefCell::new(Vec::new()),
-          edge,
-          node_state,
-          escape_in_out: escape,
-          recursive: Cell::new(false)
+            lookups: RefCell::new(Vec::new()),
+            edge,
+            node_state,
+            escape_in_out: escape,
+            recursive: Cell::new(false),
         }
     }
 
     /// Given a span of Nodes, construct a list of paths suitable for a command
     /// line.
-    pub fn make_path_list(node_state: &NodeState,
-        nodes: &[NodeIndex], sep: u8, escape_in_out: EdgeEnvEscapeKind) -> Vec<u8> {
+    pub fn make_path_list(
+        node_state: &NodeState,
+        nodes: &[NodeIndex],
+        sep: u8,
+        escape_in_out: EdgeEnvEscapeKind,
+    ) -> Vec<u8> {
 
         let mut result = Vec::new();
         for node_idx in nodes {
@@ -856,16 +929,16 @@ impl<'a, 'b> EdgeEnv<'a, 'b> {
             let node = node_state.get_node(*node_idx);
             let path = node.path_decanonicalized();
             match escape_in_out {
-              EdgeEnvEscapeKind::ShellEscape => {
-                  if WINDOWS_PATH {
-                      result.extend_from_win32_escaped_slice(&path);
-                  } else {
-                      result.extend_from_shell_escaped_slice(&path);
-                  }
-              },
-              EdgeEnvEscapeKind::DoNotEscape => {
-                  result.extend_from_slice(&path);
-              }
+                EdgeEnvEscapeKind::ShellEscape => {
+                    if WINDOWS_PATH {
+                        result.extend_from_win32_escaped_slice(&path);
+                    } else {
+                        result.extend_from_shell_escaped_slice(&path);
+                    }
+                }
+                EdgeEnvEscapeKind::DoNotEscape => {
+                    result.extend_from_slice(&path);
+                }
             }
         }
         result
@@ -878,15 +951,19 @@ impl<'a, 'b> Env for EdgeEnv<'a, 'b> {
             let sep = if var == b"in".as_ref() { b' ' } else { b'\n' };
             let explicit_deps_range = self.edge.explicit_deps_range();
             return Cow::Owned(EdgeEnv::make_path_list(
-                self.node_state, 
-                &self.edge.inputs[explicit_deps_range], sep,
-                self.escape_in_out));
+                self.node_state,
+                &self.edge.inputs[explicit_deps_range],
+                sep,
+                self.escape_in_out,
+            ));
         } else if var == b"out".as_ref() {
             let explicit_outs_range = self.edge.explicit_outs_range();
             return Cow::Owned(EdgeEnv::make_path_list(
-                self.node_state, 
-                &self.edge.outputs[explicit_outs_range], b' ',
-                self.escape_in_out));
+                self.node_state,
+                &self.edge.outputs[explicit_outs_range],
+                b' ',
+                self.escape_in_out,
+            ));
         }
 
         if self.recursive.get() {
@@ -899,7 +976,10 @@ impl<'a, 'b> Env for EdgeEnv<'a, 'b> {
                     cycle.extend_from_slice(b" -> ");
                 }
                 cycle.extend_from_slice(var);
-                fatal!("cycle in rule variables: {}", String::from_utf8_lossy(&cycle))
+                fatal!(
+                    "cycle in rule variables: {}",
+                    String::from_utf8_lossy(&cycle)
+                )
             }
         }
 
@@ -912,7 +992,13 @@ impl<'a, 'b> Env for EdgeEnv<'a, 'b> {
         // In practice, variables defined on rules never use another rule variable.
         // For performance, only start checking for cycles after the first lookup.
         self.recursive.set(true);
-        return Cow::Owned(self.edge.env.borrow().lookup_with_fallback(var, eval, self).into_owned());
+        return Cow::Owned(
+            self.edge
+                .env
+                .borrow()
+                .lookup_with_fallback(var, eval, self)
+                .into_owned(),
+        );
     }
 }
 /*

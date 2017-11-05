@@ -28,17 +28,26 @@ pub fn check_ninja_version(version: &str) {
     let (bin_major, bin_minor) = parse_version(NINJA_VERSION);
     let (file_major, file_minor) = parse_version(version);
     if bin_major > file_major {
-        warning!(concat!("ninja executable version ({}) greater than build file ",
-                "ninja_required_version ({}); versions may be incompatible."),
-                NINJA_VERSION, version);
+        warning!(
+            concat!(
+                "ninja executable version ({}) greater than build file ",
+                "ninja_required_version ({}); versions may be incompatible."
+            ),
+            NINJA_VERSION,
+            version
+        );
         return;
     }
 
-    if (bin_major == file_major && bin_minor < file_minor) ||
-        bin_major < file_major {
-        fatal!(concat!("ninja version ({}) incompatible with build file ",
-            "ninja_required_version version ({})."),
-            NINJA_VERSION, version);
+    if (bin_major == file_major && bin_minor < file_minor) || bin_major < file_major {
+        fatal!(
+            concat!(
+                "ninja version ({}) incompatible with build file ",
+                "ninja_required_version version ({})."
+            ),
+            NINJA_VERSION,
+            version
+        );
     }
 }
 

@@ -38,7 +38,7 @@ pub struct Pool {
     /// currently scheduled in the Plan (i.e. the edges in Plan::ready_).
     current_use: usize,
     depth: usize,
-    
+
     delayed: BinaryHeap<DelayedEdge>,
 }
 
@@ -77,7 +77,10 @@ impl Pool {
     /// adds the given edge to this Pool to be delayed.
     pub fn delay_edge(&mut self, state: &State, edge: EdgeIndex) {
         assert!(self.depth != 0);
-        self.delayed.push(DelayedEdge(state.edge_state.get_edge(edge).weight(), edge));
+        self.delayed.push(DelayedEdge(
+            state.edge_state.get_edge(edge).weight(),
+            edge,
+        ));
     }
 
     /// Pool will add zero or more edges to the ready_queue
@@ -89,7 +92,7 @@ impl Pool {
             self.delayed.pop();
             ready_queue.insert(edge_index);
             self.edge_scheduled(state, edge_index);
-        };
+        }
     }
 
     /// informs this Pool that the given edge is committed to be run.
@@ -157,9 +160,11 @@ struct State {
 #endif  // NINJA_STATE_H_
 */
 
-thread_local!{ 
-    pub static DEFAULT_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"".as_ref().to_owned(), 0)));
-    pub static CONSOLE_POOL: Rc<RefCell<Pool>> = Rc::new(RefCell::new(Pool::new(b"console".as_ref().to_owned(), 1)));
+thread_local!{
+    pub static DEFAULT_POOL: Rc<RefCell<Pool>> =
+        Rc::new(RefCell::new(Pool::new(b"".as_ref().to_owned(), 0)));
+    pub static CONSOLE_POOL: Rc<RefCell<Pool>> =
+        Rc::new(RefCell::new(Pool::new(b"console".as_ref().to_owned(), 1)));
 
     pub static PHONY_RULE: Rc<Rule> = Rc::new(Rule::new(b"phony".as_ref().to_owned()));
 }
@@ -204,7 +209,7 @@ impl NodeState {
 
     pub fn get_node_mut(&mut self, idx: NodeIndex) -> &mut Node {
         self.nodes.get_mut(idx.0).expect("index out of range")
-    }    
+    }
 }
 
 pub struct EdgeState {
@@ -214,9 +219,7 @@ pub struct EdgeState {
 
 impl EdgeState {
     pub fn new() -> Self {
-        EdgeState {
-            edges: Vec::new()
-        }
+        EdgeState { edges: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -253,9 +256,7 @@ pub struct PoolState {
 
 impl PoolState {
     pub fn new() -> Self {
-        PoolState {
-            pools: HashMap::new()
-        }
+        PoolState { pools: HashMap::new() }
     }
 
     pub fn add_pool(&mut self, pool: Rc<RefCell<Pool>>) {
@@ -286,21 +287,33 @@ impl State {
             edge_state: EdgeState::new(),
             pool_state: PoolState::new(),
             bindings: Rc::new(RefCell::new(BindingEnv::new())),
-            defaults: None
+            defaults: None,
         };
 
-        state.bindings.borrow_mut().add_rule(PHONY_RULE.with(Rc::clone));
+        state.bindings.borrow_mut().add_rule(
+            PHONY_RULE.with(Rc::clone),
+        );
         state.pool_state.add_pool(DEFAULT_POOL.with(Rc::clone));
         state.pool_state.add_pool(CONSOLE_POOL.with(Rc::clone));
         state
     }
 
-    pub fn connect_edge_to_in_node(edge: &mut Edge, edge_idx: EdgeIndex, node: &mut Node, node_idx: NodeIndex) {
+    pub fn connect_edge_to_in_node(
+        edge: &mut Edge,
+        edge_idx: EdgeIndex,
+        node: &mut Node,
+        node_idx: NodeIndex,
+    ) {
         edge.inputs.push(node_idx);
         node.add_out_edge(edge_idx);
     }
-    
-    pub fn connect_edge_to_out_node(edge: &mut Edge, edge_idx: EdgeIndex, node: &mut Node, node_idx: NodeIndex) -> bool {
+
+    pub fn connect_edge_to_out_node(
+        edge: &mut Edge,
+        edge_idx: EdgeIndex,
+        node: &mut Node,
+        node_idx: NodeIndex,
+    ) -> bool {
         if node.in_edge().is_some() {
             return false;
         }
@@ -316,10 +329,15 @@ impl State {
     pub fn add_default(&mut self, path: &[u8]) -> Result<(), String> {
         let node = self.node_state.lookup_node(path);
         if let Some(node_idx) = node {
-            self.defaults.get_or_insert_with(Default::default).push(node_idx);
+            self.defaults.get_or_insert_with(Default::default).push(
+                node_idx,
+            );
             Ok(())
         } else {
-            Err(format!("unknown target '{}'", String::from_utf8_lossy(path)))
+            Err(format!(
+                "unknown target '{}'",
+                String::from_utf8_lossy(path)
+            ))
         }
     }
 
@@ -394,11 +412,17 @@ impl State {
         let mut node_edge_set = HashSet::new();
         for n in self.node_state.nodes.iter() {
             if let Some(in_edge) = n.in_edge() {
-                node_edge_set.insert(self.edge_state.get_edge(in_edge) as * const _);
+                node_edge_set.insert(self.edge_state.get_edge(in_edge) as *const _);
             }
-            node_edge_set.extend(n.out_edges().iter().map(|&r| self.edge_state.get_edge(r) as * const _));
+            node_edge_set.extend(n.out_edges().iter().map(|&r| {
+                self.edge_state.get_edge(r) as *const _
+            }));
         }
-        let edge_set = self.edge_state.edges.iter().map(|r| r as * const _).collect::<HashSet<_>>();
+        let edge_set = self.edge_state
+            .edges
+            .iter()
+            .map(|r| r as *const _)
+            .collect::<HashSet<_>>();
         assert_eq!(node_edge_set, edge_set);
     }
 }

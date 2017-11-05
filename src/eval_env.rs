@@ -28,7 +28,7 @@ pub trait Env {
 #[derive(PartialEq, Clone)]
 enum TokenType {
     Raw,
-    Special
+    Special,
 }
 
 type TokenList = Vec<(Vec<u8>, TokenType)>;
@@ -42,9 +42,7 @@ pub struct EvalString {
 
 impl EvalString {
     pub fn new() -> Self {
-        EvalString {
-        parsed: TokenList::new(),
-        }
+        EvalString { parsed: TokenList::new() }
     }
 
     pub fn evaluate<E: Env + ?Sized>(&self, env: &E) -> Vec<u8> {
@@ -99,7 +97,11 @@ impl EvalString {
 
 impl fmt::Debug for EvalString {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "EvalString {{ {} }}", String::from_utf8_lossy(&self.serialize()))
+        write!(
+            formatter,
+            "EvalString {{ {} }}",
+            String::from_utf8_lossy(&self.serialize())
+        )
     }
 }
 
@@ -129,16 +131,10 @@ impl Rule {
     }
 
     pub fn is_reserved_binding(var: &[u8]) -> bool {
-        var == b"command" ||
-        var == b"depfile" ||
-        var == b"description" ||
-        var == b"deps" ||
-        var == b"generator" ||
-        var == b"pool" ||
-        var == b"restat" ||
-        var == b"rspfile" ||
-        var == b"rspfile_content" ||
-        var == b"msvc_deps_prefix"
+        var == b"command" || var == b"depfile" || var == b"description" || var == b"deps" ||
+            var == b"generator" || var == b"pool" ||
+            var == b"restat" || var == b"rspfile" || var == b"rspfile_content" ||
+            var == b"msvc_deps_prefix"
     }
 
     pub fn get_binding(&self, key: &[u8]) -> Option<&EvalString> {
@@ -151,7 +147,7 @@ impl Rule {
 pub struct BindingEnv {
     bindings: BTreeMap<Vec<u8>, Vec<u8>>,
     rules: BTreeMap<Vec<u8>, Rc<Rule>>,
-    parent: Option<Rc<RefCell<BindingEnv>>>
+    parent: Option<Rc<RefCell<BindingEnv>>>,
 }
 
 impl BindingEnv {
@@ -170,7 +166,7 @@ impl BindingEnv {
             parent: parent,
         }
     }
-    
+
     pub fn add_binding(&mut self, key: &[u8], val: &[u8]) {
         self.bindings.insert(key.to_owned(), val.to_owned());
     }
@@ -189,7 +185,9 @@ impl BindingEnv {
         }
 
         if let Some(ref parent) = self.parent {
-            return parent.borrow().lookup_rule(rule_name).map(|c| Cow::Owned(c.into_owned()));
+            return parent.borrow().lookup_rule(rule_name).map(|c| {
+                Cow::Owned(c.into_owned())
+            });
         }
 
         return None;
@@ -209,7 +207,12 @@ impl BindingEnv {
     /// 2) value set on rule, with expansion in the edge's scope
     /// 3) value set on enclosing scope of edge (edge_->env_->parent_)
     /// This function takes as parameters the necessary info to do (2).
-    pub fn lookup_with_fallback(&self, var: &[u8], eval: Option<&EvalString>, env: &Env) -> Cow<[u8]> {
+    pub fn lookup_with_fallback(
+        &self,
+        var: &[u8],
+        eval: Option<&EvalString>,
+        env: &Env,
+    ) -> Cow<[u8]> {
         if let Some(self_binding) = self.bindings.get(var) {
             return Cow::Borrowed(self_binding.as_ref());
         }

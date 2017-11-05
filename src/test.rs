@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
-use std::io::{self};
+use std::io;
 
 use super::disk_interface::{FileReader, FileReaderError, DiskInterface};
 use super::manifest_parser::{ManifestParserOptions, ManifestParser};
@@ -43,23 +43,32 @@ impl<OtherData: Default> TestWithStateAndVFS<OtherData> {
 
     pub fn new_with_builtin_rule() -> Self {
         let mut test = Self::new_minimal();
-        test.assert_parse(concat!("rule cat\n", "  command = cat $in > $out\n").as_bytes());
+        test.assert_parse(
+            concat!("rule cat\n", "  command = cat $in > $out\n").as_bytes(),
+        );
         test
     }
 
-    pub fn assert_parse_with_options(&mut self, input: &[u8], 
-        options: ManifestParserOptions) -> () {
+    pub fn assert_parse_with_options(
+        &mut self,
+        input: &[u8],
+        options: ManifestParserOptions,
+    ) -> () {
         let mut state = self.state.borrow_mut();
         {
             let mut parser = ManifestParser::new(&mut state, &self.fs, options);
             assert_eq!(Ok(()), parser.parse_test(input));
         }
-          
+
         assert_eq!((), state.verify_graph());
     }
 
-    pub fn assert_parse_with_options_error(&mut self, input: &[u8], 
-        options: ManifestParserOptions, err: &str) -> () {
+    pub fn assert_parse_with_options_error(
+        &mut self,
+        input: &[u8],
+        options: ManifestParserOptions,
+        err: &str,
+    ) -> () {
         let mut state = self.state.borrow_mut();
         let mut parser = ManifestParser::new(&mut state, &self.fs, options);
         assert_eq!(Err(err.to_owned()), parser.parse_test(input));
@@ -150,15 +159,17 @@ impl VirtualFileSystem {
 
     /// "Create" a file with contents.
     pub fn create(&mut self, path: &Path, contents: &[u8]) {
-        self.files.insert(path.to_owned(), VirtualFileSystemEntry {
-          mtime: self.now,
-          stat_error: String::new(),
-          contents: contents.to_owned(),
-        });
+        self.files.insert(
+            path.to_owned(),
+            VirtualFileSystemEntry {
+                mtime: self.now,
+                stat_error: String::new(),
+                contents: contents.to_owned(),
+            },
+        );
 
         self.files_created.insert(path.to_owned());
     }
-
 }
 
 impl FileReader for VirtualFileSystem {
@@ -168,7 +179,9 @@ impl FileReader for VirtualFileSystem {
             *contents = file_contents.contents.clone();
             Ok(())
         } else {
-            Err(FileReaderError::NotFound("No such file or directory".to_owned()))
+            Err(FileReaderError::NotFound(
+                "No such file or directory".to_owned(),
+            ))
         }
     }
 }

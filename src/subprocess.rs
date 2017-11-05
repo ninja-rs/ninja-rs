@@ -48,7 +48,7 @@ using namespace std;
 #[cfg(windows)]
 struct SubprocessOs {
     pub child: ::winapi::HANDLE,
-    pub pipe:  ::winapi::HANDLE,
+    pub pipe: ::winapi::HANDLE,
     pub overlapped: ::winapi::OVERLAPPED,
     pub overlapped_buf: [u8; 4096],
     pub is_reading: bool,
@@ -80,7 +80,6 @@ pub struct Subprocess {
 }
 
 impl Subprocess {
-
     // always boxed to make sure pointer to self is not changed.
     pub(super) fn new(use_console: bool) -> Box<Self> {
         Box::new(Subprocess {
@@ -92,7 +91,7 @@ impl Subprocess {
 
     pub fn output(&self) -> &[u8] {
         &self.buf
-    }    
+    }
 }
 
 #[cfg(windows)]
@@ -135,11 +134,18 @@ impl Subprocess {
 
         let nul_name = wstrz!("NUL");
 
-        let nul = unsafe { kernel32::CreateFileW(nul_name.as_ptr(), 
-            winapi::GENERIC_READ,
-            winapi::FILE_SHARE_READ | winapi::FILE_SHARE_WRITE | winapi::FILE_SHARE_DELETE,
-            &mut security_attributes as _, winapi::OPEN_EXISTING, 0, null_mut()) };
-        
+        let nul = unsafe {
+            kernel32::CreateFileW(
+                nul_name.as_ptr(),
+                winapi::GENERIC_READ,
+                winapi::FILE_SHARE_READ | winapi::FILE_SHARE_WRITE | winapi::FILE_SHARE_DELETE,
+                &mut security_attributes as _,
+                winapi::OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+
         if nul == winapi::INVALID_HANDLE_VALUE {
             fatal!("couldn't open nul");
         }
@@ -158,25 +164,38 @@ impl Subprocess {
         let mut process_info = unsafe { zeroed::<winapi::PROCESS_INFORMATION>() };
 
         // Ninja handles ctrl-c, except for subprocesses in console pools.
-        let process_flags = if self.use_console { 0 } else { winapi::CREATE_NEW_PROCESS_GROUP };
+        let process_flags = if self.use_console {
+            0
+        } else {
+            winapi::CREATE_NEW_PROCESS_GROUP
+        };
 
         // Do not prepend 'cmd /c' on Windows, this breaks command
         // lines greater than 8,191 chars.
         let cmd_unicode = ::std::str::from_utf8(command);
         let create_process_result = match &cmd_unicode {
             &Err(_) => Err(None),
-            &Ok (ref cmd_unicode) => {
+            &Ok(ref cmd_unicode) => {
                 if let Ok(cmd) = ::widestring::WideCString::from_str(cmd_unicode) {
                     let mut cmd = cmd.into_vec();
-                    if unsafe { 
-                          kernel32::CreateProcessW(null_mut(), 
-                                cmd.as_mut_ptr(), null_mut(), null_mut(),
-                                winapi::TRUE, process_flags, null_mut(), 
-                                null_mut(), &mut startup_info as _, &mut process_info as _) }
-                           != winapi::FALSE {
+                    if unsafe {
+                        kernel32::CreateProcessW(
+                            null_mut(),
+                            cmd.as_mut_ptr(),
+                            null_mut(),
+                            null_mut(),
+                            winapi::TRUE,
+                            process_flags,
+                            null_mut(),
+                            null_mut(),
+                            &mut startup_info as _,
+                            &mut process_info as _,
+                        )
+                    } != winapi::FALSE
+                    {
                         Ok(())
                     } else {
-                        Err(Some(unsafe {kernel32::GetLastError()}))
+                        Err(Some(unsafe { kernel32::GetLastError() }))
                     }
                 } else {
                     Err(None)
@@ -195,23 +214,26 @@ impl Subprocess {
                 unsafe { kernel32::CloseHandle(process_info.hThread) };
                 self.extra.child = process_info.hProcess;
                 true
-            },
-            Err(e @ Some(winapi::ERROR_FILE_NOT_FOUND)) | Err(e @ None) => {
+            }
+            Err(e @ Some(winapi::ERROR_FILE_NOT_FOUND)) |
+            Err(e @ None) => {
                 // File (program) not found error is treated as a normal build
                 // action failure.
                 unsafe { kernel32::CloseHandle(self.extra.pipe) };
                 self.extra.pipe = null_mut();
                 // child_ is already NULL;
                 self.buf = if e.is_some() {
-                    b"CreateProcess failed: The system cannot find the file specified.\n".as_ref().to_owned()
+                    b"CreateProcess failed: The system cannot find the file specified.\n"
+                        .as_ref()
+                        .to_owned()
                 } else {
-                    b"CreateProcess failed: The command is not valid UTF-8 string.\n".as_ref().to_owned()
+                    b"CreateProcess failed: The command is not valid UTF-8 string.\n"
+                        .as_ref()
+                        .to_owned()
                 };
                 true
             }
-            Err(Some(e)) => {
-                fatal!("CreateProcess : {}", ::errno::Errno(e as _))
-            },
+            Err(Some(e)) => fatal!("CreateProcess : {}", ::errno::Errno(e as _)),
         }
     }
 
@@ -225,19 +247,25 @@ impl Subprocess {
         use std::mem::zeroed;
         use std::ptr::null_mut;
         use widestring::WideCString;
-        let pipe_name = format!("\\\\.\\pipe\\ninja_pid{}_sp{:p}", 
+        let pipe_name = format!(
+            "\\\\.\\pipe\\ninja_pid{}_sp{:p}",
             unsafe { kernel32::GetCurrentProcessId() },
-            self);
+            self
+        );
 
         let pipe_name = WideCString::from_str(pipe_name).unwrap().into_vec();
 
         self.extra.pipe = unsafe {
-          kernel32::CreateNamedPipeW(
-            pipe_name.as_ptr(),
-            winapi::PIPE_ACCESS_INBOUND | winapi::FILE_FLAG_OVERLAPPED,
-            winapi::PIPE_TYPE_BYTE,
-            winapi::PIPE_UNLIMITED_INSTANCES,
-            0, 0, winapi::INFINITE, null_mut())
+            kernel32::CreateNamedPipeW(
+                pipe_name.as_ptr(),
+                winapi::PIPE_ACCESS_INBOUND | winapi::FILE_FLAG_OVERLAPPED,
+                winapi::PIPE_TYPE_BYTE,
+                winapi::PIPE_UNLIMITED_INSTANCES,
+                0,
+                0,
+                winapi::INFINITE,
+                null_mut(),
+            )
         };
 
         if self.extra.pipe == winapi::INVALID_HANDLE_VALUE {
@@ -245,7 +273,12 @@ impl Subprocess {
         }
 
         let create_port_result = unsafe {
-            kernel32::CreateIoCompletionPort(self.extra.pipe, ioport, self as * mut _ as usize as _, 0)
+            kernel32::CreateIoCompletionPort(
+                self.extra.pipe,
+                ioport,
+                self as *mut _ as usize as _,
+                0,
+            )
         };
         if create_port_result.is_null() {
             fatal!("CreateIoCompletionPort : {}", errno::errno());
@@ -253,22 +286,39 @@ impl Subprocess {
 
         self.extra.overlapped = unsafe { zeroed() };
         if unsafe {
-            kernel32::ConnectNamedPipe(self.extra.pipe, &mut self.extra.overlapped as _ )
-        } == winapi::FALSE && unsafe { kernel32::GetLastError() } != winapi::ERROR_IO_PENDING {
+            kernel32::ConnectNamedPipe(self.extra.pipe, &mut self.extra.overlapped as _)
+        } == winapi::FALSE &&
+            unsafe { kernel32::GetLastError() } != winapi::ERROR_IO_PENDING
+        {
             fatal!("ConnectNamedPipe : {}", errno::errno());
         }
 
         // Get the write end of the pipe as a handle inheritable across processes.
-        let output_write_handle = unsafe { 
-          kernel32::CreateFileW(pipe_name.as_ptr(), winapi::GENERIC_WRITE, 0, null_mut(), 
-                                winapi::OPEN_EXISTING, 0, null_mut())
+        let output_write_handle = unsafe {
+            kernel32::CreateFileW(
+                pipe_name.as_ptr(),
+                winapi::GENERIC_WRITE,
+                0,
+                null_mut(),
+                winapi::OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
         };
         let mut output_write_child = null_mut();
-        if unsafe { kernel32::DuplicateHandle(
-            kernel32::GetCurrentProcess(), output_write_handle,
-            kernel32::GetCurrentProcess(), &mut output_write_child as _,
-            0, winapi::TRUE, winapi::DUPLICATE_SAME_ACCESS) } == winapi::FALSE {
-            
+        if unsafe {
+            kernel32::DuplicateHandle(
+                kernel32::GetCurrentProcess(),
+                output_write_handle,
+                kernel32::GetCurrentProcess(),
+                &mut output_write_child as _,
+                0,
+                winapi::TRUE,
+                winapi::DUPLICATE_SAME_ACCESS,
+            )
+        } == winapi::FALSE
+        {
+
             fatal!("DuplicateHandle : {}", errno::errno());
         }
 
@@ -287,41 +337,50 @@ impl Subprocess {
         use std::ptr::null_mut;
 
         let mut bytes = 0 as winapi::DWORD;
-        if unsafe { kernel32::GetOverlappedResult(
-            self.extra.pipe, 
-            &mut self.extra.overlapped as * mut _,
-            &mut bytes as * mut _,
-            winapi::TRUE)} == winapi::FALSE {
-            
-            if unsafe {kernel32::GetLastError()} == winapi::ERROR_BROKEN_PIPE {
+        if unsafe {
+            kernel32::GetOverlappedResult(
+                self.extra.pipe,
+                &mut self.extra.overlapped as *mut _,
+                &mut bytes as *mut _,
+                winapi::TRUE,
+            )
+        } == winapi::FALSE
+        {
+
+            if unsafe { kernel32::GetLastError() } == winapi::ERROR_BROKEN_PIPE {
                 unsafe { kernel32::CloseHandle(self.extra.pipe) };
                 self.extra.pipe = null_mut();
-            }
-            else {
+            } else {
                 fatal!("GetOverlappedResult: {}", errno::errno());
             }
             return;
         }
         if self.extra.is_reading && bytes > 0 {
-          self.buf.extend_from_slice(&self.extra.overlapped_buf[0..(bytes as usize)]);
+            self.buf.extend_from_slice(
+                &self.extra.overlapped_buf[0..(bytes as usize)],
+            );
         }
 
         self.extra.overlapped = unsafe { zeroed() };
         self.extra.is_reading = true;
 
-        if unsafe { kernel32::ReadFile(
-            self.extra.pipe, 
-            self.extra.overlapped_buf.as_mut_ptr() as usize as _, 
-            size_of_val(&self.extra.overlapped_buf) as _,
-            &mut bytes as * mut _,
-            &mut self.extra.overlapped as * mut _) } == winapi::FALSE {
+        if unsafe {
+            kernel32::ReadFile(
+                self.extra.pipe,
+                self.extra.overlapped_buf.as_mut_ptr() as usize as _,
+                size_of_val(&self.extra.overlapped_buf) as _,
+                &mut bytes as *mut _,
+                &mut self.extra.overlapped as *mut _,
+            )
+        } == winapi::FALSE
+        {
 
             match unsafe { kernel32::GetLastError() } {
-                winapi::ERROR_IO_PENDING => { },
+                winapi::ERROR_IO_PENDING => {}
                 winapi::ERROR_BROKEN_PIPE => {
                     unsafe { kernel32::CloseHandle(self.extra.pipe) };
                     self.extra.pipe = null_mut();
-                },
+                }
                 e => {
                     fatal!("ReadFile : {}", errno::errno());
                 }
@@ -355,12 +414,12 @@ impl Subprocess {
         self.extra.child = ::std::ptr::null_mut();
 
         match exit_code as _ {
-          0 => ExitStatus::ExitSuccess,
-          winapi::STATUS_CONTROL_C_EXIT => ExitStatus::ExitInterrupted,
-          _ => ExitStatus::ExitFailure,
+            0 => ExitStatus::ExitSuccess,
+            winapi::STATUS_CONTROL_C_EXIT => ExitStatus::ExitInterrupted,
+            _ => ExitStatus::ExitFailure,
         }
     }
-    
+
     fn done(&self) -> bool {
         self.extra.pipe.is_null()
     }
@@ -418,13 +477,12 @@ struct Subprocess {
 */
 
 #[cfg(windows)]
-struct SubprocessSetOs {
-
-}
+struct SubprocessSetOs {}
 
 #[cfg(windows)]
 thread_local! {
-    static IOPORT : ::std::cell::Cell<::winapi::HANDLE> = ::std::cell::Cell::new(::std::ptr::null_mut());
+    static IOPORT : ::std::cell::Cell<::winapi::HANDLE> =
+        ::std::cell::Cell::new(::std::ptr::null_mut());
 }
 
 #[cfg(windows)]
@@ -437,21 +495,20 @@ impl SubprocessSetOs {
     pub fn new() -> Self {
         use winapi;
         use kernel32;
-        use errno; 
+        use errno;
         use std::ptr::null_mut;
 
-        let v = SubprocessSetOs{};
-        let ioport = unsafe { kernel32::CreateIoCompletionPort(
-              winapi::INVALID_HANDLE_VALUE, 
-              null_mut(),
-              0,
-              1)};
+        let v = SubprocessSetOs {};
+        let ioport = unsafe {
+            kernel32::CreateIoCompletionPort(winapi::INVALID_HANDLE_VALUE, null_mut(), 0, 1)
+        };
         if ioport.is_null() {
             fatal!("CreateIoCompletionPort: {}", errno::errno());
         }
         v.set_ioport(ioport);
-        if unsafe { kernel32::SetConsoleCtrlHandler(Some(notify_interrupted), winapi::TRUE)} 
-            == winapi::FALSE {
+        if unsafe { kernel32::SetConsoleCtrlHandler(Some(notify_interrupted), winapi::TRUE) } ==
+            winapi::FALSE
+        {
             fatal!("SetConsoleCtrlHandler: {}", errno::errno());
         }
         v
@@ -468,9 +525,7 @@ impl SubprocessSetOs {
 
 
 #[cfg(unix)]
-struct SubprocessSetOs {
-
-}
+struct SubprocessSetOs {}
 
 
 /// SubprocessSet runs a ppoll/pselect() loop around a set of Subprocesses.
@@ -483,8 +538,18 @@ pub struct SubprocessSet<Data = ()> {
 }
 
 type Iter<'a, Data> = ::std::iter::Chain<
-    ::std::collections::vec_deque::Iter<'a, (Box<Subprocess>, Data)>,
-    ::std::collections::hash_map::Values<'a, usize, (Box<Subprocess>, Data)>>;
+    ::std::collections::vec_deque::Iter<
+        'a,
+        (Box<Subprocess>,
+         Data),
+    >,
+    ::std::collections::hash_map::Values<
+        'a,
+        usize,
+        (Box<Subprocess>,
+         Data),
+    >,
+>;
 
 impl<Data> SubprocessSet<Data> {
     pub fn new() -> Self {
@@ -495,24 +560,28 @@ impl<Data> SubprocessSet<Data> {
         }
     }
 
-    pub fn running(&self) -> &HashMap<usize, (Box<Subprocess>,Data)> {
+    pub fn running(&self) -> &HashMap<usize, (Box<Subprocess>, Data)> {
         &self.running
     }
 
-    pub fn finished(&self) -> &VecDeque<(Box<Subprocess>,Data)> {
+    pub fn finished(&self) -> &VecDeque<(Box<Subprocess>, Data)> {
         &self.finished
     }
 
-    pub fn add(&mut self, command: &[u8], use_console: bool, data: Data) 
-        -> Option<&mut(Box<Subprocess>, Data)> {
-            
+    pub fn add(
+        &mut self,
+        command: &[u8],
+        use_console: bool,
+        data: Data,
+    ) -> Option<&mut (Box<Subprocess>, Data)> {
+
         let mut subprocess = Subprocess::new(use_console);
         if !subprocess.start(self, command) {
             return None;
         }
 
         if subprocess.exist() {
-            let key = subprocess.as_ref() as * const _ as usize;
+            let key = subprocess.as_ref() as *const _ as usize;
             self.running.insert(key, (subprocess, data));
             return self.running.get_mut(&key);
         } else {
@@ -538,7 +607,6 @@ impl<Data> SubprocessSet<Data> {
 
 #[cfg(windows)]
 impl<Data> SubprocessSet<Data> {
-
     // return Err(()) if interrupted.
     pub fn do_work(&mut self) -> Result<(), ()> {
         use winapi;
@@ -550,11 +618,16 @@ impl<Data> SubprocessSet<Data> {
         let mut subproc = null_mut::<Subprocess>();
         let mut overlapped = null_mut::<winapi::OVERLAPPED>();
 
-        if unsafe { kernel32::GetQueuedCompletionStatus(self.extra.ioport(), 
-                    &mut bytes_read as _, 
-                    &mut subproc as * mut _ as usize as _, 
-                    &mut overlapped as * mut _,
-                    winapi::INFINITE)} == winapi::FALSE {
+        if unsafe {
+            kernel32::GetQueuedCompletionStatus(
+                self.extra.ioport(),
+                &mut bytes_read as _,
+                &mut subproc as *mut _ as usize as _,
+                &mut overlapped as *mut _,
+                winapi::INFINITE,
+            )
+        } == winapi::FALSE
+        {
             if unsafe { kernel32::GetLastError() } != winapi::ERROR_BROKEN_PIPE {
                 fatal!("GetQueuedCompletionStatus: {}", errno::errno());
             }
@@ -571,7 +644,11 @@ impl<Data> SubprocessSet<Data> {
         };
 
         if done {
-            self.finished.extend(self.running.remove(&(subproc as usize)).into_iter());
+            self.finished.extend(
+                self.running
+                    .remove(&(subproc as usize))
+                    .into_iter(),
+            );
         }
 
         return Ok(());
@@ -616,7 +693,7 @@ struct SubprocessSet {
 
 #[cfg(windows)]
 mod imp {
-/*
+    /*
 // Copyright 2012 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -833,7 +910,7 @@ void SubprocessSet::Clear() {
 
 #[cfg(unix)]
 mod imp {
-/*
+    /*
 // Copyright 2012 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

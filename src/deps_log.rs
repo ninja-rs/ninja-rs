@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use super::graph::{NodeIndex};
+use super::graph::NodeIndex;
 use super::timestamp::TimeStamp;
 use super::state::State;
 
@@ -60,7 +60,7 @@ pub struct DepsLog {}
 
 impl DepsLog {
     pub fn new() -> Self {
-        DepsLog{}
+        DepsLog {}
     }
 
     pub fn load(&mut self, path: &Path, state: &mut State) -> Result<Option<String>, String> {
@@ -73,7 +73,13 @@ impl DepsLog {
         unimplemented!()
     }
 
-    pub fn record_deps(&self, state: &State, node_idx: NodeIndex, mtime: TimeStamp, nodes: &[NodeIndex]) -> Result<(), ()> {
+    pub fn record_deps(
+        &self,
+        state: &State,
+        node_idx: NodeIndex,
+        mtime: TimeStamp,
+        nodes: &[NodeIndex],
+    ) -> Result<(), ()> {
         return Ok(());
         unimplemented!()
     }

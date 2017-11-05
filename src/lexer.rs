@@ -39,25 +39,24 @@ pub enum LexerToken {
 }
 
 impl LexerToken {
-
     /// Return a human-readable form of a token, used in error messages.
     pub fn name(&self) -> &'static str {
         match *self {
-            LexerToken::ERROR     => "lexing error",
-            LexerToken::BUILD     => "'build'",
-            LexerToken::COLON     => "':'",
-            LexerToken::DEFAULT   => "'default'",
-            LexerToken::EQUALS    => "'='",
-            LexerToken::IDENT     => "identifier",
-            LexerToken::INCLUDE   => "'include'",
-            LexerToken::INDENT    => "indent",
-            LexerToken::NEWLINE   => "newline",
-            LexerToken::PIPE2     => "'||'",
-            LexerToken::PIPE      => "'|'",
-            LexerToken::POOL      => "'pool'",
-            LexerToken::RULE      => "'rule'",
-            LexerToken::SUBNINJA  => "'subninja'",
-            LexerToken::TEOF      => "eof",
+            LexerToken::ERROR => "lexing error",
+            LexerToken::BUILD => "'build'",
+            LexerToken::COLON => "':'",
+            LexerToken::DEFAULT => "'default'",
+            LexerToken::EQUALS => "'='",
+            LexerToken::IDENT => "identifier",
+            LexerToken::INCLUDE => "'include'",
+            LexerToken::INDENT => "indent",
+            LexerToken::NEWLINE => "newline",
+            LexerToken::PIPE2 => "'||'",
+            LexerToken::PIPE => "'|'",
+            LexerToken::POOL => "'pool'",
+            LexerToken::RULE => "'rule'",
+            LexerToken::SUBNINJA => "'subninja'",
+            LexerToken::TEOF => "eof",
         }
     }
 
@@ -68,7 +67,6 @@ impl LexerToken {
             _ => "",
         }
     }
-
 }
 
 pub struct Lexer<'a, 'b> {
@@ -80,37 +78,30 @@ pub struct Lexer<'a, 'b> {
 
 fn is_simple_varname_char(c: u8) -> bool {
     match c {
-    b'a'...b'z' |
-    b'A'...b'Z' |
-    b'0'...b'9' |
-    b'_' | b'-' => true,
-    _ => false,
+        b'a'...b'z' | b'A'...b'Z' | b'0'...b'9' | b'_' | b'-' => true,
+        _ => false,
     }
 }
 
 fn is_varname_char(c: u8) -> bool {
     match c {
-    b'a'...b'z' |
-    b'A'...b'Z' |
-    b'0'...b'9' |
-    b'.' |
-    b'_' | b'-' => true,
-    _ => false,
+        b'a'...b'z' | b'A'...b'Z' | b'0'...b'9' | b'.' | b'_' | b'-' => true,
+        _ => false,
     }
 }
 
 
 fn is_comment_char(c: u8) -> bool {
     match c {
-    0 | b'\n' => false,
-    _ => true,
+        0 | b'\n' => false,
+        _ => true,
     }
 }
 
 fn is_text_char(ch: u8) -> bool {
     match ch {
-    b'$' | b' ' | b':' | b'\r' | b'\n' | b'|' | 0 => false,
-    _ => true
+        b'$' | b' ' | b':' | b'\r' | b'\n' | b'|' | 0 => false,
+        _ => true,
     }
 }
 
@@ -141,9 +132,8 @@ impl<'a, 'b> Lexer<'a, 'b> {
     /// or the empty string.
     pub fn describe_last_error(&self) -> &'static str {
         match self.input.get(self.last_token_offset) {
-            Some(&b'\t') => 
-                "tabs are not allowed, use spaces",
-            _ => "lexing error"
+            Some(&b'\t') => "tabs are not allowed, use spaces",
+            _ => "lexing error",
         }
     }
 
@@ -154,7 +144,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
         named!(skip_comment<&[u8], ()>,
             fold_many0!(
                 complete!(
-                    preceded!(take_while!(is_sp_char), 
+                    preceded!(take_while!(is_sp_char),
                         terminated!(preceded!(char!('#'), take_while!(is_comment_char)),
                             char!('\n')))),
                 (),
@@ -173,7 +163,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
 
         named!(read_one_token<&[u8], LexerToken>,
             alt_complete!(
-                value!(LexerToken::NEWLINE, 
+                value!(LexerToken::NEWLINE,
                     preceded!(take_while!(is_sp_char),
                         preceded!(opt!(char!('\r')), char!('\n')))) |
                 value!(LexerToken::INDENT, take_while1!(is_sp_char)) |
@@ -187,13 +177,13 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 value!(LexerToken::TEOF, eof!())
                 ));
 
-        let token : LexerToken;
+        let token: LexerToken;
 
         match skip_comment(rest_input) {
             IResult::Done(i, _) => {
                 rest_input = i;
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         self.last_token_offset = self.input.offset(rest_input);
@@ -202,17 +192,19 @@ impl<'a, 'b> Lexer<'a, 'b> {
             IResult::Done(i, v) => {
                 rest_input = i;
                 token = v;
-            },
+            }
             _ => {
                 panic!("unreachable");
-            }            
+            }
         }
 
         self.offset = self.input.offset(rest_input);
 
         match token {
-            LexerToken::NEWLINE | LexerToken::TEOF => {},
-            _ => { self.eat_whitespace(); },
+            LexerToken::NEWLINE | LexerToken::TEOF => {}
+            _ => {
+                self.eat_whitespace();
+            }
         }
 
         return token;
@@ -237,12 +229,9 @@ impl<'a, 'b> Lexer<'a, 'b> {
     /// Returns false if a name can't be read.
     pub fn read_ident(&mut self, message: &str) -> Result<&[u8], String> {
         let rest_input = &self.input[self.offset..];
-        named!(read_ident_token,
-            take_while1!(is_varname_char));
+        named!(read_ident_token, take_while1!(is_varname_char));
         let (i, v) = match read_ident_token(rest_input) {
-            IResult::Done(i, v) => {
-                (i, v)
-            },
+            IResult::Done(i, v) => (i, v),
             _ => {
                 return Err(self.error(message));
             }
@@ -258,7 +247,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
     pub fn read_path(&mut self, path: &mut EvalString) -> Result<(), String> {
         self.read_evalstring(path, true)
     }
-    
+
 
     /// Read the value side of a var = value line (complete with $escapes).
     /// Returns false only on error.
@@ -270,25 +259,37 @@ impl<'a, 'b> Lexer<'a, 'b> {
     pub fn error(&self, message: &str) -> String {
         // Compute line/column.
         let context = &self.input[0..self.last_token_offset];
-        let (last_line_idx, last_line_cnt) = context.split(|ch| ch == &b'\n').enumerate().last().unwrap();
+        let (last_line_idx, last_line_cnt) =
+            context.split(|ch| ch == &b'\n').enumerate().last().unwrap();
 
         let line = last_line_idx + 1;
         let col = last_line_cnt.len();
 
-        let mut err = format!("{}:{}: {}\n", self.filename.to_string_lossy(), line, message);
+        let mut err = format!(
+            "{}:{}: {}\n",
+            self.filename.to_string_lossy(),
+            line,
+            message
+        );
 
         const TRUNCATE_COLUMN: usize = 72;
         if col > 0 && col < TRUNCATE_COLUMN {
             let last_line_start = self.input.offset(last_line_cnt);
-            let last_line_fulltext = self.input[last_line_start..].split(|ch| ch == &b'\n' || ch == &0).next().unwrap();
+            let last_line_fulltext = self.input[last_line_start..]
+                .split(|ch| ch == &b'\n' || ch == &0)
+                .next()
+                .unwrap();
             let mut last_line_context_len = last_line_fulltext.len();
             let truncated = last_line_context_len >= TRUNCATE_COLUMN;
             if truncated {
                 last_line_context_len = TRUNCATE_COLUMN;
             }
 
-            err += &format!("{}{}\n{}^ near here",
-                String::from_utf8_lossy(&self.input[last_line_start..last_line_start + last_line_context_len]),
+            err += &format!(
+                "{}{}\n{}^ near here",
+                String::from_utf8_lossy(
+                    &self.input[last_line_start..last_line_start + last_line_context_len],
+                ),
                 if truncated { "..." } else { "" },
                 (0..col).map(|_| ' ').collect::<String>()
             );
@@ -311,20 +312,20 @@ impl<'a, 'b> Lexer<'a, 'b> {
         match skip_whitespace(rest_input) {
             IResult::Done(i, _) => {
                 rest_input = i;
-            },
+            }
             _ => {}
         }
 
         self.offset = self.input.offset(rest_input);
     }
-    
+
     /// Read a $-escaped string.
     pub fn read_evalstring(&mut self, eval: &mut EvalString, path: bool) -> Result<(), String> {
         let mut rest_input = &self.input[self.offset..];
 
         enum TokenResult<'a> {
-            Text(&'a[u8]),
-            Special(&'a[u8]),
+            Text(&'a [u8]),
+            Special(&'a [u8]),
             Ignored,
             StopHere,
             Error(&'static str),
@@ -343,15 +344,17 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 map!(preceded!(tag!("$"), tag!(" ")), TokenResult::Text) |
                 value!(TokenResult::Ignored, preceded!(tag!("$\r\n"),take_while!(is_sp_char))) |
                 value!(TokenResult::Ignored, preceded!(tag!("$\n"),take_while!(is_sp_char))) |
-                map!(delimited!(tag!("${"), take_while1!(is_varname_char), tag!("}")), TokenResult::Special) |
-                map!(preceded!(tag!("$"), take_while1!(is_simple_varname_char)), TokenResult::Special) |
+                map!(delimited!(tag!("${"), take_while1!(is_varname_char), tag!("}")),
+                    TokenResult::Special) |
+                map!(preceded!(tag!("$"), take_while1!(is_simple_varname_char)),
+                    TokenResult::Special) |
                 map!(preceded!(tag!("$"), tag!(":")), TokenResult::Text) |
                 value!(TokenResult::Error("bad $-escape (literal $ must be written as $$)"),
                     peek!(preceded!(tag!("$"), alt_complete!(take!(1)|eof!())))) |
                 value!(TokenResult::Error("unexpected EOF"),
                     alt_complete!(peek!(tag!("\0"))|eof!())) |
                 value!(TokenResult::ErrorLastError, peek!(take!(1)))));
-        
+
         loop {
             match read_evalstring_token(rest_input, path) {
                 IResult::Done(i, v) => {
@@ -359,20 +362,20 @@ impl<'a, 'b> Lexer<'a, 'b> {
                         TokenResult::Text(p) => {
                             eval.add_text(p);
                             rest_input = i;
-                        },
+                        }
                         TokenResult::Special(p) => {
                             eval.add_special(p);
                             rest_input = i;
-                        },
+                        }
                         TokenResult::Ignored => {
                             rest_input = i;
-                        },
+                        }
                         TokenResult::StopHere => {
                             self.last_token_offset = self.input.offset(rest_input);
                             rest_input = i;
                             self.offset = self.input.offset(rest_input);
                             break;
-                        },
+                        }
                         TokenResult::Error(p) => {
                             self.last_token_offset = self.input.offset(rest_input);
                             return Err(self.error(p));
@@ -382,19 +385,16 @@ impl<'a, 'b> Lexer<'a, 'b> {
                             return Err(self.error(self.describe_last_error()));
                         }
                     }
-                },
-                _ => {
-                    unreachable!()
                 }
+                _ => unreachable!(),
             }
-        };
+        }
 
         if path {
             self.eat_whitespace();
         }
         Ok(())
     }
-
 }
 
 #[test]
