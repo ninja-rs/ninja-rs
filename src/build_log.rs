@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::timestamp::TimeStamp;
-use super::graph::Edge;
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+
+use super::timestamp::TimeStamp;
+use super::graph::{Edge, EdgeIndex};
+use super::state::State;
+
 
 /// Can answer questions about the manifest for the BuildLog.
 pub trait BuildLogUser {
@@ -55,11 +57,12 @@ impl<'a> BuildLog<'a> {
         unimplemented!()
     }
 
-    pub fn record_command_without_timestamp(&mut self, edge: &mut Edge, start_time: isize, end_time: isize) -> bool {
-        self.record_command(edge, start_time, end_time, TimeStamp::default())
+    pub fn record_command_without_timestamp(&self, state: &State, edge_idx: EdgeIndex, start_time: u64, end_time: u64) -> Result<(), ()> {
+        self.record_command(state, edge_idx, start_time, end_time, TimeStamp::default())
     }
 
-    pub fn record_command(&mut self, edge: &mut Edge, start_time: isize, end_time: isize, mtime: TimeStamp) -> bool {
+    pub fn record_command(&self, state: &State, edge_idx: EdgeIndex, start_time: u64, end_time: u64, mtime: TimeStamp) -> Result<(), ()> {
+        return Ok(());
         unimplemented!()
     }
 

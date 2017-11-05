@@ -254,6 +254,10 @@ impl Edge {
         (self.inputs.len() - self.order_only_deps)
     }
 
+    pub fn non_order_only_deps_range(&self) -> Range<usize> {
+        0..(self.inputs.len() - self.order_only_deps)
+    }
+
     pub fn order_only_deps_range(&self) -> Range<usize> {
         (self.inputs.len() - self.order_only_deps)..(self.inputs.len())
     }
@@ -372,6 +376,10 @@ impl<'b, 'c> ImplicitDepLoader<'b, 'c> {
         }
     }
 
+    pub fn deps_log(&self) -> &'b DepsLog {
+        self.deps_log
+    }
+
     /// Load implicit dependencies for \a edge.
     /// @return false on error (without filling \a err if info is just missing
     //                          or out of date).
@@ -442,7 +450,7 @@ struct ImplicitDepLoader {
 /// DependencyScan manages the process of scanning the files in a graph
 /// and updating the dirty/outputs_ready state of all the nodes and edges.
 pub struct DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
-    build_log: &'a BuildLog<'s>,
+    build_log: Option<&'a BuildLog<'s>>,
     deps_log: &'b DepsLog,
     disk_interface: &'c DiskInterface,
     dep_loader: ImplicitDepLoader<'b, 'c>
@@ -451,11 +459,19 @@ pub struct DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
 impl<'s, 'a, 'b, 'c> DependencyScan<'s, 'a, 'b, 'c> where 's : 'a {
     pub fn new(build_log: &'a BuildLog<'s>, deps_log: &'b DepsLog, disk_interface: &'c DiskInterface) -> Self {
         DependencyScan {
-            build_log,
+            build_log: Some(build_log),
             deps_log,
             disk_interface,
             dep_loader: ImplicitDepLoader::new(deps_log, disk_interface)
         }
+    }
+
+    pub fn build_log(&self) -> Option<&'a BuildLog<'s>> {
+        self.build_log.clone()
+    }
+
+    pub fn deps_log(&self) -> &'b DepsLog {
+        self.dep_loader.deps_log()
     }
 
     /// Update the |dirty_| state of the given node by inspecting its input edge.

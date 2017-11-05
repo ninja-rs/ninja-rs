@@ -23,6 +23,8 @@ use super::graph::{NodeIndex, EdgeIndex, DependencyScan};
 use super::exit_status::ExitStatus;
 use super::metrics::Stopwatch;
 use super::metrics::get_time_millis;
+use super::debug_flags::KEEP_RSP;
+use super::timestamp::TimeStamp;
 use super::subprocess::SubprocessSet;
 use super::utils::{get_load_average, pathbuf_from_bytes};
 use super::line_printer::{LinePrinter, LinePrinterLineType};
@@ -234,6 +236,12 @@ impl Plan {
                 self.edge_finished(state, out_edge_idx, EdgeResult::EdgeSucceeded);
             }
         }
+    }
+
+    /// Clean the given node during the build.
+    /// Return false on error.
+    pub fn clean_node(&mut self, scan: &DependencyScan, State: &State, node_idx: NodeIndex) -> Result<(), String> {
+        unimplemented!()
     }
 }
 
@@ -530,8 +538,138 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
 
     /// Update status ninja logs following a command termination.
     /// @return false if the build can not proceed further due to a fatal error.
-    fn finish_command(&mut self, result: CommandRunnerResult) -> Result<CommandRunnerResult, String> {
-        unimplemented!()
+    fn finish_command(&mut self, mut result: CommandRunnerResult) -> Result<CommandRunnerResult, String> {
+        use errno;
+
+        metric_record!("FinishCommand");
+
+        let edge_idx = result.edge;
+
+        // First try to extract dependencies from the result, if any.
+        // This must happen first as it filters the command output (we want
+        // to filter /showIncludes output, even on compile failure) and
+        // extraction itself can fail, which makes the command fail from a
+        // build perspective.
+        let mut deps_nodes = Vec::new();
+
+        let (deps_type, deps_prefix) = {
+            let edge = self.state.edge_state.get_edge(edge_idx);
+            let deps_type = edge.get_binding(&self.state.node_state, b"deps");
+            let deps_prefix = edge.get_binding(&self.state.node_state, b"msvc_deps_prefix");
+            (deps_type.into_owned(), deps_prefix.into_owned())
+        };
+        if !deps_type.is_empty() {
+            match self.extract_deps(&mut result, deps_type.as_ref(), deps_prefix.as_ref()) {
+                Ok(n) => { deps_nodes = n; },
+                Err(e) => {
+                    if result.is_success() {
+                        if !result.output.is_empty() {
+                            result.output.extend_from_slice(b"\n".as_ref());
+                        }
+                        result.output.extend_from_slice(e.as_bytes());
+                        result.status = ExitStatus::ExitFailure;
+                    }
+                }
+            }            
+        }
+
+        let (start_time, end_time) = 
+            self.status.build_edge_finished(self.state, edge_idx, result.is_success(), &result.output);
+        
+        if !result.is_success() {
+            self.plan.edge_finished(self.state, edge_idx, EdgeResult::EdgeFailed);
+            return Ok(result);
+        }
+
+        // The rest of this function only applies to successful commands.
+
+        // Restat the edge outputs
+        let mut output_mtime = TimeStamp(0);
+        let restat = self.state.edge_state.get_edge(edge_idx).get_binding_bool(&self.state.node_state, b"restat");
+        if !self.config.dry_run {
+            let edge = self.state.edge_state.get_edge(edge_idx);
+            let mut node_cleaned = false;
+            for o_node_idx in edge.outputs.iter() {
+                let o_node = self.state.node_state.get_node(*o_node_idx);
+                let path = pathbuf_from_bytes(o_node.path().to_owned()).map_err(|e| {
+                    format!("Invalid utf-8 pathname {}", String::from_utf8_lossy(&e))
+                })?;
+                let new_mtime = self.disk_interface.stat(&path)?;
+                if new_mtime > output_mtime {
+                    output_mtime = new_mtime;
+                }
+                if o_node.mtime() == new_mtime && restat {
+                    // The rule command did not change the output.  Propagate the clean
+                    // state through the build graph.
+                    // Note that this also applies to nonexistent outputs (mtime == 0).
+                    self.plan.clean_node(&self.scan, self.state, *o_node_idx)?;
+                    node_cleaned = true;
+                }
+            }
+
+            if node_cleaned {
+                let mut restat_mtime = TimeStamp(0);
+                // If any output was cleaned, find the most recent mtime of any
+                // (existing) non-order-only input or the depfile.
+                for i_idx in edge.inputs[edge.non_order_only_deps_range()].iter() {
+                    let path = pathbuf_from_bytes(self.state.node_state.get_node(*i_idx).path().to_owned())
+                        .map_err(|e| format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e)))?;
+                    let input_mtime = self.disk_interface.stat(&path)?;
+                    if input_mtime > restat_mtime {
+                        restat_mtime = input_mtime;
+                    }
+                }
+                
+                let depfile = edge.get_unescaped_depfile(&self.state.node_state);
+                if restat_mtime.0 != 0 && deps_type.is_empty() && !depfile.is_empty() {
+                    let path = pathbuf_from_bytes(depfile.into_owned())
+                        .map_err(|e| format!("invalid utf-8 filename: {}", String::from_utf8_lossy(&e)))?;
+                    let depfile_mtime = self.disk_interface.stat(&path)?;
+                    if depfile_mtime > restat_mtime {
+                        restat_mtime = depfile_mtime;
+                    }
+                }
+
+                // The total number of edges in the plan may have changed as a result
+                // of a restat.
+                self.status.plan_has_total_edges(self.plan.command_edge_count());
+                output_mtime = restat_mtime;
+            }
+        }
+
+        self.plan.edge_finished(self.state, edge_idx, EdgeResult::EdgeSucceeded);
+
+        let edge = self.state.edge_state.get_edge(edge_idx);
+        let rspfile = edge.get_unescaped_rspfile(&self.state.node_state);
+        if !rspfile.is_empty() && !KEEP_RSP {
+            if let Ok(path) = pathbuf_from_bytes(rspfile.into_owned()) {
+                let _ = self.disk_interface.remove_file(&path);
+            };
+        }
+
+        if let Some(build_log) = self.scan.build_log() {
+            build_log.record_command(self.state, edge_idx, start_time, end_time, output_mtime).map_err(|e| {
+                format!("Error writing to build log: {}", errno::errno())
+            })?;
+        }
+
+        if !deps_type.is_empty() && !self.config.dry_run {
+            assert!(edge.outputs.len() == 1);
+            //or it should have been rejected by parser.
+            let out_idx = edge.outputs[0];
+            let out = self.state.node_state.get_node(out_idx);
+            let path = pathbuf_from_bytes(out.path().to_owned()).map_err(|e| {
+                format!("Invalid utf-8 pathname {}", String::from_utf8_lossy(&e))
+            })?;
+
+            let deps_mtime = self.disk_interface.stat(&path)?;
+
+            self.scan.deps_log().record_deps(self.state, out_idx, deps_mtime, &deps_nodes).map_err(|e| {
+                format!("Error writing to deps log: {}", errno::errno())
+            })?;
+        }
+
+        Ok(result)
     }
 
     /// Clean up after interrupted commands by deleting output files.
@@ -576,6 +714,11 @@ impl<'s, 'p, 'a, 'b, 'c> Builder<'s, 'p, 'a, 'b, 'c> where 's : 'a {
                 };
             }
         }
+    }
+
+    fn extract_deps(&self, result: &mut CommandRunnerResult, deps_type: &[u8], deps_prefix: &[u8])
+        -> Result<Vec<NodeIndex>, String> {
+          unimplemented!{}
     }
 }
 
@@ -704,6 +847,71 @@ impl<'a> BuildStatus<'a> {
         }
     }
 
+    pub fn build_edge_finished(&mut self, state: &State, edge_idx: EdgeIndex, success: bool, output: &[u8]) -> (u64, u64) {
+        let now = get_time_millis();
+        self.finished_edges += 1;
+
+        let start_time = self.running_edges.remove(&edge_idx).unwrap();
+        let end_time = now - self.start_time_millis;
+
+        if state.edge_state.get_edge(edge_idx).use_console() {
+            self.printer.set_console_locked(false);
+        }
+
+        match self.config.verbosity {
+          BuildConfigVerbosity::QUIET => { return (start_time, end_time); }
+          _ => {},
+        };
+
+/*
+  if (!edge->use_console())
+    PrintStatus(edge, kEdgeFinished);
+
+  // Print the command that is spewing before printing its output.
+  if (!success) {
+    string outputs;
+    for (vector<Node*>::const_iterator o = edge->outputs_.begin();
+         o != edge->outputs_.end(); ++o)
+      outputs += (*o)->path() + " ";
+
+    printer_.PrintOnNewLine("FAILED: " + outputs + "\n");
+    printer_.PrintOnNewLine(edge->EvaluateCommand() + "\n");
+  }
+
+  if (!output.empty()) {
+    // ninja sets stdout and stderr of subprocesses to a pipe, to be able to
+    // check if the output is empty. Some compilers, e.g. clang, check
+    // isatty(stderr) to decide if they should print colored output.
+    // To make it possible to use colored output with ninja, subprocesses should
+    // be run with a flag that forces them to always print color escape codes.
+    // To make sure these escape codes don't show up in a file if ninja's output
+    // is piped to a file, ninja strips ansi escape codes again if it's not
+    // writing to a |smart_terminal_|.
+    // (Launching subprocesses in pseudo ttys doesn't work because there are
+    // only a few hundred available on some systems, and ninja can launch
+    // thousands of parallel compile commands.)
+    // TODO: There should be a flag to disable escape code stripping.
+    string final_output;
+    if (!printer_.is_smart_terminal())
+      final_output = StripAnsiEscapeCodes(output);
+    else
+      final_output = output;
+
+#ifdef _WIN32
+    // Fix extra CR being added on Windows, writing out CR CR LF (#773)
+    _setmode(_fileno(stdout), _O_BINARY);  // Begin Windows extra CR fix
+#endif
+
+    printer_.PrintOnNewLine(final_output);
+
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_TEXT);  // End Windows extra CR fix
+#endif
+  }
+*/
+        return (start_time, end_time);
+        unimplemented!();
+    }
 
     /// Format the progress status string by replacing the placeholders.
     /// See the user manual for more information about the available
@@ -1417,120 +1625,7 @@ bool Builder::StartEdge(Edge* edge, string* err) {
 }
 
 bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
-  METRIC_RECORD("FinishCommand");
 
-  Edge* edge = result->edge;
-
-  // First try to extract dependencies from the result, if any.
-  // This must happen first as it filters the command output (we want
-  // to filter /showIncludes output, even on compile failure) and
-  // extraction itself can fail, which makes the command fail from a
-  // build perspective.
-  vector<Node*> deps_nodes;
-  string deps_type = edge->GetBinding("deps");
-  const string deps_prefix = edge->GetBinding("msvc_deps_prefix");
-  if (!deps_type.empty()) {
-    string extract_err;
-    if (!ExtractDeps(result, deps_type, deps_prefix, &deps_nodes,
-                     &extract_err) &&
-        result->success()) {
-      if (!result->output.empty())
-        result->output.append("\n");
-      result->output.append(extract_err);
-      result->status = ExitFailure;
-    }
-  }
-
-  int start_time, end_time;
-  status_->BuildEdgeFinished(edge, result->success(), result->output,
-                             &start_time, &end_time);
-
-  // The rest of this function only applies to successful commands.
-  if (!result->success()) {
-    plan_.EdgeFinished(edge, Plan::kEdgeFailed);
-    return true;
-  }
-
-  // Restat the edge outputs
-  TimeStamp output_mtime = 0;
-  bool restat = edge->GetBindingBool("restat");
-  if (!config_.dry_run) {
-    bool node_cleaned = false;
-
-    for (vector<Node*>::iterator o = edge->outputs_.begin();
-         o != edge->outputs_.end(); ++o) {
-      TimeStamp new_mtime = disk_interface_->Stat((*o)->path(), err);
-      if (new_mtime == -1)
-        return false;
-      if (new_mtime > output_mtime)
-        output_mtime = new_mtime;
-      if ((*o)->mtime() == new_mtime && restat) {
-        // The rule command did not change the output.  Propagate the clean
-        // state through the build graph.
-        // Note that this also applies to nonexistent outputs (mtime == 0).
-        if (!plan_.CleanNode(&scan_, *o, err))
-          return false;
-        node_cleaned = true;
-      }
-    }
-
-    if (node_cleaned) {
-      TimeStamp restat_mtime = 0;
-      // If any output was cleaned, find the most recent mtime of any
-      // (existing) non-order-only input or the depfile.
-      for (vector<Node*>::iterator i = edge->inputs_.begin();
-           i != edge->inputs_.end() - edge->order_only_deps_; ++i) {
-        TimeStamp input_mtime = disk_interface_->Stat((*i)->path(), err);
-        if (input_mtime == -1)
-          return false;
-        if (input_mtime > restat_mtime)
-          restat_mtime = input_mtime;
-      }
-
-      string depfile = edge->GetUnescapedDepfile();
-      if (restat_mtime != 0 && deps_type.empty() && !depfile.empty()) {
-        TimeStamp depfile_mtime = disk_interface_->Stat(depfile, err);
-        if (depfile_mtime == -1)
-          return false;
-        if (depfile_mtime > restat_mtime)
-          restat_mtime = depfile_mtime;
-      }
-
-      // The total number of edges in the plan may have changed as a result
-      // of a restat.
-      status_->PlanHasTotalEdges(plan_.command_edge_count());
-
-      output_mtime = restat_mtime;
-    }
-  }
-
-  plan_.EdgeFinished(edge, Plan::kEdgeSucceeded);
-
-  // Delete any left over response file.
-  string rspfile = edge->GetUnescapedRspfile();
-  if (!rspfile.empty() && !g_keep_rsp)
-    disk_interface_->RemoveFile(rspfile);
-
-  if (scan_.build_log()) {
-    if (!scan_.build_log()->RecordCommand(edge, start_time, end_time,
-                                          output_mtime)) {
-      *err = string("Error writing to build log: ") + strerror(errno);
-      return false;
-    }
-  }
-
-  if (!deps_type.empty() && !config_.dry_run) {
-    assert(edge->outputs_.size() == 1 && "should have been rejected by parser");
-    Node* out = edge->outputs_[0];
-    TimeStamp deps_mtime = disk_interface_->Stat(out->path(), err);
-    if (deps_mtime == -1)
-      return false;
-    if (!scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes)) {
-      *err = string("Error writing to deps log: ") + strerror(errno);
-      return false;
-    }
-  }
-  return true;
 }
 
 bool Builder::ExtractDeps(CommandRunner::Result* result,

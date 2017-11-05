@@ -52,12 +52,12 @@ macro_rules! explain {
 macro_rules! fatal {
     ($fmt:expr) => 
         ({
-            eprint!(concat!("ninja warning: ", $fmt, "\n"));
+            eprint!(concat!("ninja fatal: ", $fmt, "\n"));
             $crate::utils::exit();
         });
     ($fmt:expr, $($arg:tt)*) =>
         ({
-            eprint!(concat!("ninja warning: ", $fmt, "\n"), $($arg)*);
+            eprint!(concat!("ninja fatal: ", $fmt, "\n"), $($arg)*);
             $crate::utils::exit();
         });
 }

@@ -14,6 +14,8 @@
 
 use std::path::Path;
 
+use super::graph::{NodeIndex};
+use super::timestamp::TimeStamp;
 use super::state::State;
 
 /// As build commands run they can output extra dependency information
@@ -66,6 +68,11 @@ impl DepsLog {
     }
 
     pub fn open_for_write(&self, path: &Path) -> Result<(), String> {
+        return Ok(());
+        unimplemented!()
+    }
+
+    pub fn record_deps(&self, state: &State, node_idx: NodeIndex, mtime: TimeStamp, nodes: &[NodeIndex]) -> Result<(), ()> {
         return Ok(());
         unimplemented!()
     }

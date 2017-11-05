@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::cell::Cell;
 
 use super::exit_status::ExitStatus;
@@ -167,13 +167,15 @@ impl Subprocess {
             &Ok (ref cmd_unicode) => {
                 if let Ok(cmd) = ::widestring::WideCString::from_str(cmd_unicode) {
                     let mut cmd = cmd.into_vec();
-                    unsafe {
-                        if kernel32::CreateProcessW(null_mut(), cmd.as_mut_ptr(), null_mut(), null_mut(),
-                            winapi::TRUE, process_flags, null_mut(), null_mut(), &mut startup_info as _, &mut process_info as _) != winapi::FALSE {
-                                Ok(())
-                            } else {
-                                Err(Some(unsafe {kernel32::GetLastError()}))
-                            }
+                    if unsafe { 
+                          kernel32::CreateProcessW(null_mut(), 
+                                cmd.as_mut_ptr(), null_mut(), null_mut(),
+                                winapi::TRUE, process_flags, null_mut(), 
+                                null_mut(), &mut startup_info as _, &mut process_info as _) }
+                           != winapi::FALSE {
+                        Ok(())
+                    } else {
+                        Err(Some(unsafe {kernel32::GetLastError()}))
                     }
                 } else {
                     Err(None)
@@ -276,6 +278,60 @@ impl Subprocess {
         output_write_child
     }
 
+    pub fn on_pipe_ready(&mut self) {
+        use winapi;
+        use kernel32;
+        use errno;
+        use std::mem::{zeroed, size_of_val};
+        use std::ptr::null_mut;
+
+        let mut bytes = 0 as winapi::DWORD;
+        if unsafe { kernel32::GetOverlappedResult(
+            self.extra.pipe, 
+            &mut self.extra.overlapped as * mut _,
+            &mut bytes as * mut _,
+            winapi::TRUE)} == winapi::FALSE {
+            
+            if unsafe {kernel32::GetLastError()} == winapi::ERROR_BROKEN_PIPE {
+                unsafe { kernel32::CloseHandle(self.extra.pipe) };
+                self.extra.pipe = null_mut();
+            }
+            else {
+                fatal!("GetOverlappedResult: {}", errno::errno());
+            }
+            return;
+        }
+        if self.extra.is_reading && bytes > 0 {
+          self.buf.extend_from_slice(&self.extra.overlapped_buf[0..(bytes as usize)]);
+        }
+
+        self.extra.overlapped = unsafe { zeroed() };
+        self.extra.is_reading = true;
+
+        if unsafe { kernel32::ReadFile(
+            self.extra.pipe, 
+            self.extra.overlapped_buf.as_mut_ptr() as usize as _, 
+            size_of_val(&self.extra.overlapped_buf) as _,
+            &mut bytes as * mut _,
+            &mut self.extra.overlapped as * mut _) } == winapi::FALSE {
+
+            match unsafe { kernel32::GetLastError() } {
+                winapi::ERROR_IO_PENDING => { },
+                winapi::ERROR_BROKEN_PIPE => {
+                    unsafe { kernel32::CloseHandle(self.extra.pipe) };
+                    self.extra.pipe = null_mut();
+                },
+                e => {
+                    fatal!("ReadFile : {}", errno::errno());
+                }
+            }
+            return;
+        }
+
+        // Even if we read any bytes in the readfile call, we'll enter this
+        // function again later and get them at that point.
+    }
+
     /// Returns ExitSuccess on successful process exit, ExitInterrupted if
     /// the process was interrupted, ExitFailure if it otherwise failed.
     pub fn finish(&mut self) -> ExitStatus {
@@ -371,9 +427,33 @@ thread_local! {
 }
 
 #[cfg(windows)]
+unsafe extern "system" fn notify_interrupted(_: ::winapi::DWORD) -> ::winapi::BOOL {
+    unimplemented!{}
+}
+
+#[cfg(windows)]
 impl SubprocessSetOs {
     pub fn new() -> Self {
-        SubprocessSetOs{}
+        use winapi;
+        use kernel32;
+        use errno; 
+        use std::ptr::null_mut;
+
+        let v = SubprocessSetOs{};
+        let ioport = unsafe { kernel32::CreateIoCompletionPort(
+              winapi::INVALID_HANDLE_VALUE, 
+              null_mut(),
+              0,
+              1)};
+        if ioport.is_null() {
+            fatal!("CreateIoCompletionPort: {}", errno::errno());
+        }
+        v.set_ioport(ioport);
+        if unsafe { kernel32::SetConsoleCtrlHandler(Some(notify_interrupted), winapi::TRUE)} 
+            == winapi::FALSE {
+            fatal!("SetConsoleCtrlHandler: {}", errno::errno());
+        }
+        v
     }
 
     pub fn ioport(&self) -> ::winapi::HANDLE {
@@ -396,25 +476,25 @@ struct SubprocessSetOs {
 /// DoWork() waits for any state change in subprocesses; finished_
 /// is a queue of subprocesses as they finish.
 pub struct SubprocessSet<Data = ()> {
-    running: Vec<(Box<Subprocess>, Data)>,
+    running: HashMap<usize, (Box<Subprocess>, Data)>,
     finished: VecDeque<(Box<Subprocess>, Data)>,
     extra: SubprocessSetOs,
 }
 
 type Iter<'a, Data> = ::std::iter::Chain<
     ::std::collections::vec_deque::Iter<'a, (Box<Subprocess>, Data)>,
-    ::std::slice::Iter<'a, (Box<Subprocess>, Data)>>;
+    ::std::collections::hash_map::Values<'a, usize, (Box<Subprocess>, Data)>>;
 
 impl<Data> SubprocessSet<Data> {
     pub fn new() -> Self {
         SubprocessSet {
-            running: Vec::new(),
+            running: HashMap::new(),
             finished: VecDeque::new(),
             extra: SubprocessSetOs::new(),
         }
     }
 
-    pub fn running(&self) -> &Vec<(Box<Subprocess>,Data)> {
+    pub fn running(&self) -> &HashMap<usize, (Box<Subprocess>,Data)> {
         &self.running
     }
 
@@ -431,17 +511,13 @@ impl<Data> SubprocessSet<Data> {
         }
 
         if subprocess.exist() {
-            self.running.push((subprocess, data));
-            return self.running.last_mut();
+            let key = subprocess.as_ref() as * const _ as usize;
+            self.running.insert(key, (subprocess, data));
+            return self.running.get_mut(&key);
         } else {
             self.finished.push_back((subprocess, data));
             return self.finished.back_mut();
         }
-    }
-
-    // return Err(()) if interrupted.
-    pub fn do_work(&mut self) -> Result<(), ()> {
-        unimplemented!()
     }
 
     pub fn next_finished(&mut self) -> Option<(Box<Subprocess>, Data)> {
@@ -449,13 +525,55 @@ impl<Data> SubprocessSet<Data> {
     }
 
     pub fn iter<'a>(&'a self) -> Iter<'a, Data> {
-        self.finished.iter().chain(self.running.iter())
+        self.finished.iter().chain(self.running.values())
     }
 
     pub fn clear(&mut self) {
         self.running.clear();
         return;
         unimplemented!{}
+    }
+}
+
+#[cfg(windows)]
+impl<Data> SubprocessSet<Data> {
+
+    // return Err(()) if interrupted.
+    pub fn do_work(&mut self) -> Result<(), ()> {
+        use winapi;
+        use kernel32;
+        use errno;
+        use std::ptr::null_mut;
+
+        let mut bytes_read = 0 as winapi::DWORD;
+        let mut subproc = null_mut::<Subprocess>();
+        let mut overlapped = null_mut::<winapi::OVERLAPPED>();
+
+        if unsafe { kernel32::GetQueuedCompletionStatus(self.extra.ioport(), 
+                    &mut bytes_read as _, 
+                    &mut subproc as * mut _ as usize as _, 
+                    &mut overlapped as * mut _,
+                    winapi::INFINITE)} == winapi::FALSE {
+            if unsafe { kernel32::GetLastError() } != winapi::ERROR_BROKEN_PIPE {
+                fatal!("GetQueuedCompletionStatus: {}", errno::errno());
+            }
+        }
+
+        let done = if let Some(subproc) = unsafe { subproc.as_mut() } {
+            subproc.on_pipe_ready();
+
+            subproc.done()
+        } else {
+            // A NULL subproc indicates that we were interrupted and is
+            // delivered by NotifyInterrupted above.
+            return Err(());
+        };
+
+        if done {
+            self.finished.extend(self.running.remove(&(subproc as usize)).into_iter());
+        }
+
+        return Ok(());
     }
 }
 
