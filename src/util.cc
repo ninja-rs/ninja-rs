@@ -604,8 +604,3 @@ bool Truncate(const string& path, size_t size, string* err) {
   }
   return true;
 }
-
-
-extern "C" FILE* ninja_get_c_stdout() {
-  return stdout;
-}
