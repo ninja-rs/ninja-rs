@@ -18,33 +18,6 @@ use std::cell::Cell;
 
 use super::exit_status::ExitStatus;
 
-/*
-
-#ifndef NINJA_SUBPROCESS_H_
-#define NINJA_SUBPROCESS_H_
-
-#include <string>
-#include <vector>
-#include <queue>
-using namespace std;
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <signal.h>
-#endif
-
-// ppoll() exists on FreeBSD, but only on newer versions.
-#ifdef __FreeBSD__
-#  include <sys/param.h>
-#  if defined USE_PPOLL && __FreeBSD_version < 1002000
-#    undef USE_PPOLL
-#  endif
-#endif
-
-#include "exit_status.h"
-*/
-
 #[cfg(windows)]
 struct SubprocessOs {
     pub child: ::winapi::HANDLE,
@@ -438,6 +411,12 @@ impl Subprocess {
     fn done(&self) -> bool {
         self.extra.fd.is_none()
     }
+
+    /// Returns ExitSuccess on successful process exit, ExitInterrupted if
+    /// the process was interrupted, ExitFailure if it otherwise failed.
+    pub fn finish(&mut self) -> ExitStatus {
+        unimplemented!()
+    }
 }
 
 /*
@@ -527,6 +506,12 @@ impl SubprocessSetOs {
 #[cfg(unix)]
 struct SubprocessSetOs {}
 
+#[cfg(unix)]
+impl SubprocessSetOs {
+    pub fn new() -> Self {
+        unimplemented!()
+    }
+}
 
 /// SubprocessSet runs a ppoll/pselect() loop around a set of Subprocesses.
 /// DoWork() waits for any state change in subprocesses; finished_
@@ -652,6 +637,14 @@ impl<Data> SubprocessSet<Data> {
         }
 
         return Ok(());
+    }
+}
+
+#[cfg(unix)]
+impl<Data> SubprocessSet<Data> {
+    // return Err(()) if interrupted.
+    pub fn do_work(&mut self) -> Result<(), ()> {
+        unimplemented!()
     }
 }
 

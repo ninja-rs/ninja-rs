@@ -148,7 +148,7 @@ impl DiskInterface for RealDiskInterface {
         use std::os::unix::fs::MetadataExt;
         metric_record!("node stat");
         path.metadata()
-            .map(|m| TimeStamp(m.st_mtime() as isize))
+            .map(|m| TimeStamp(m.mtime() as isize))
             .or_else(|e| if e.kind() == ErrorKind::NotFound {
                 Ok(TimeStamp(0))
             } else {

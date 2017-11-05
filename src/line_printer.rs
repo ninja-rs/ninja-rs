@@ -33,13 +33,14 @@ impl LinePrinterOs {
     fn should_be_smart(&self) -> bool {
         use libc;
         use std::env;
+        use std::ffi;
 
-        if !libc::isatty(1usize as _) {
+        if unsafe { libc::isatty(1usize as _) } != 0 {
             return false;
         }
 
         if let Some(term) = env::var_os("TERM") {
-            if term != "dumb".into() {
+            if term != ffi::OsString::from("dumb") {
                 return true;
             }
         }

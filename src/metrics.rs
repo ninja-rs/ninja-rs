@@ -128,18 +128,16 @@ impl Stopwatch {
 fn high_res_timer() -> u64 {
     use std::ptr;
     use errno;
+    use libc;
 
     let mut tv = libc::timeval {
         tv_sec: 0,
         tv_usec: 0,
     };
-    if unsafe {
-        libc::gettimeofday(&mut tv, ptr::null_mut());
-    } < 0
-    {
+    if unsafe { libc::gettimeofday(&mut tv, ptr::null_mut()) } < 0 {
         fatal!("gettimeofday:{}", errno::errno());
     }
-    return tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+    return tv.tv_sec as u64 * 1000 * 1000 + tv.tv_usec as u64;
 }
 
 #[cfg(windows)]

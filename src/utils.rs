@@ -19,6 +19,7 @@ use libc_stdhandle;
 use errno;
 use num_cpus;
 use std::path::PathBuf;
+use std::ffi::OsString;
 
 /// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top
 /// of a function to get timing stats recorded for each call of the function.
@@ -138,6 +139,8 @@ pub fn get_processor_count() -> usize {
 
 #[cfg(unix)]
 fn pathbuf_from_bytes_os(bytes: Vec<u8>) -> Result<PathBuf, Vec<u8>> {
+    use std::os::unix::ffi::OsStringExt;
+
     Ok(PathBuf::from(OsString::from_vec(bytes)))
 }
 
@@ -417,25 +420,18 @@ pub trait ExtendFromEscapedSlice<T> {
     fn extend_from_win32_escaped_slice(&mut self, other: &[T]);
 }
 
-/*
-static inline bool IsKnownShellSafeCharacter(char ch) {
-  if ('A' <= ch && ch <= 'Z') return true;
-  if ('a' <= ch && ch <= 'z') return true;
-  if ('0' <= ch && ch <= '9') return true;
-
-  switch (ch) {
-    case '_':
-    case '+':
-    case '-':
-    case '.':
-    case '/':
-      return true;
-    default:
-      return false;
-  }
+#[inline]
+fn is_known_shell_safe_character(ch: u8) -> bool {
+    match ch {
+        b'A'...b'Z' => true,
+        b'a'...b'z' => true,
+        b'0'...b'9' => true,
+        b'_' | b'+' | b'-' | b'.' | b'/' => true,
+        _ => false,
+    }
 }
-*/
 
+#[inline]
 fn is_known_win32_safe_char(ch: u8) -> bool {
     match ch {
         b' ' | b'"' => false,
@@ -443,27 +439,24 @@ fn is_known_win32_safe_char(ch: u8) -> bool {
     }
 }
 
-/*
-static inline bool StringNeedsShellEscaping(const string& input) {
-  for (size_t i = 0; i < input.size(); ++i) {
-    if (!IsKnownShellSafeCharacter(input[i])) return true;
-  }
-  return false;
+#[inline]
+fn slice_needs_shell_escaping(input: &[u8]) -> bool {
+    !input.iter().cloned().all(is_known_shell_safe_character)
 }
-*/
+
+#[inline]
 fn slice_needs_win32_escaping(input: &[u8]) -> bool {
     !input.iter().cloned().all(is_known_win32_safe_char)
 }
 
+impl ExtendFromEscapedSlice<u8> for Vec<u8> {
+    fn extend_from_shell_escaped_slice(&mut self, input: &[u8]) {
+        if !slice_needs_shell_escaping(input) {
+            self.extend_from_slice(input);
+            return;
+        }
+        unimplemented!()
 /*
-void GetShellEscapedString(const string& input, string* result) {
-  assert(result);
-
-  if (!StringNeedsShellEscaping(input)) {
-    result->append(input);
-    return;
-  }
-
   const char kQuote = '\'';
   const char kEscapeSequence[] = "'\\'";
 
@@ -480,48 +473,8 @@ void GetShellEscapedString(const string& input, string* result) {
   }
   result->append(span_begin, input.end());
   result->push_back(kQuote);
-}
-
-
-void GetWin32EscapedString(const string& input, string* result) {
-  assert(result);
-  if (!StringNeedsWin32Escaping(input)) {
-    result->append(input);
-    return;
-  }
-
-  const char kQuote = '"';
-  const char kBackslash = '\\';
-
-  result->push_back(kQuote);
-  size_t consecutive_backslash_count = 0;
-  string::const_iterator span_begin = input.begin();
-  for (string::const_iterator it = input.begin(), end = input.end(); it != end;
-       ++it) {
-    switch (*it) {
-      case kBackslash:
-        ++consecutive_backslash_count;
-        break;
-      case kQuote:
-        result->append(span_begin, it);
-        result->append(consecutive_backslash_count + 1, kBackslash);
-        span_begin = it;
-        consecutive_backslash_count = 0;
-        break;
-      default:
-        consecutive_backslash_count = 0;
-        break;
-    }
-  }
-  result->append(span_begin, input.end());
-  result->append(consecutive_backslash_count, kBackslash);
-  result->push_back(kQuote);
-}
 */
 
-impl ExtendFromEscapedSlice<u8> for Vec<u8> {
-    fn extend_from_shell_escaped_slice(&mut self, input: &[u8]) {
-        unimplemented!()
     }
     fn extend_from_win32_escaped_slice(&mut self, input: &[u8]) {
         if !slice_needs_win32_escaping(input) {
@@ -841,11 +794,11 @@ double GetLoadAverage() {
 pub fn get_load_average() -> Option<f64> {
     let mut load_avg: [f64; 3] = [0.0f64, 0.0f64, 0.0f64];
     unsafe {
-        if libc::getloadavg(load_avg.as_mut().ptr_mut(), 3) < 0 {
+        if libc::getloadavg(load_avg.as_mut_ptr(), 3) < 0 {
             return None;
         }
     }
-    load_avg[0]
+    Some(load_avg[0])
 }
 
 /*

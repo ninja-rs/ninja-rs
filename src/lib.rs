@@ -16,6 +16,8 @@
 extern crate libc;
 extern crate libc_stdhandle;
 extern crate errno;
+#[macro_use]
+extern crate cfg_if;
 #[cfg(windows)]
 extern crate winapi;
 #[cfg(windows)]
