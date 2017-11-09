@@ -188,10 +188,26 @@ void GetWin32EscapedString(const string& input, string* result);
 /// on Windows).
 /// Returns -errno and fills in \a err on error.
 int ReadFile(const string& path, string* contents, string* err);
+*/
 
 /// Mark a file descriptor to not be inherited on exec()s.
-void SetCloseOnExec(int fd);
+#[cfg(unix)]
+pub fn set_close_on_exec(fd: ::libc::c_int) {
+    use libc;
+    use errno;
 
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            fatal!("fcntl(F_GETFD): {}", errno::errno());
+        }
+        if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+            fatal!("fcntl(F_SETFD): {}", errno::errno());
+        }     
+    }
+}
+
+/*
 /// Given a misspelled string and a list of correct spellings, returns
 /// the closest match or NULL if there is no close enough match.
 const char* SpellcheckStringV(const string& text,

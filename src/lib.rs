@@ -15,6 +15,8 @@
 
 extern crate libc;
 extern crate libc_stdhandle;
+#[cfg(unix)]
+extern crate libc_spawn;
 extern crate errno;
 #[macro_use]
 extern crate cfg_if;

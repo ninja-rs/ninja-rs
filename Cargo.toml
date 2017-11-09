@@ -20,5 +20,8 @@ kernel32-sys = "0.2"
 widestring = "0.2"
 wstr = {version = "0.2", features = ["widestring"]}
 
+[target."cfg(unix)".dependencies]
+libc-spawn = {git = "https://github.com/crlf0710/libc-spawn"}
+
 [build-dependencies]
 cc = "1"

@@ -15,6 +15,8 @@
 
 use std::collections::{VecDeque, HashMap};
 use std::cell::Cell;
+#[cfg(unix)]
+use super::utils::set_close_on_exec;
 
 use super::exit_status::ExitStatus;
 
@@ -405,7 +407,110 @@ impl Subprocess {
     }
 
     pub(super) fn start<T>(&mut self, set: &mut SubprocessSet<T>, command: &[u8]) -> bool {
-        unimplemented!()
+        use libc;
+        use libc_spawn;
+        use std::mem;
+        use std::ffi;
+        use std::ptr;
+        use errno;
+
+        unsafe {
+            let mut output_pipe: [libc::c_int; 2] = mem::zeroed();
+            if libc::pipe(output_pipe.as_mut_ptr()) < 0 {
+                fatal!("pipe: {}", errno::errno());
+            }
+
+            let pipe0 = output_pipe[0];
+            let pipe1 = output_pipe[1];
+            self.extra.fd = Some(pipe0);
+            if !set.use_ppoll() {
+                // If available, we use ppoll in DoWork(); otherwise we use pselect
+                // and so must avoid overly-large FDs.
+                if pipe0 >= libc::FD_SETSIZE as _ {
+                    fatal!("pipe: {}", errno::Errno(libc::EMFILE));
+                }
+            }
+
+            set_close_on_exec(pipe0);
+
+            let mut action: libc_spawn::posix_spawn_file_actions_t = mem::zeroed();
+            if libc_spawn::posix_spawn_file_actions_init(&mut action as _) != 0 {
+                fatal!("posix_spawn_file_actions_init: {}", errno::errno());
+            }
+
+            if libc_spawn::posix_spawn_file_actions_addclose(&mut action as _, pipe0) != 0 {
+                fatal!("posix_spawn_file_actions_addclose: {}", errno::errno());
+            }
+
+            let mut attr = mem::zeroed::<libc_spawn::posix_spawnattr_t>();
+            if libc_spawn::posix_spawnattr_init(&mut attr as _) != 0 {
+                fatal!("posix_spawnattr_init: {}", errno::errno());
+            }
+
+            let mut flags = 0;
+            flags |= libc_spawn::POSIX_SPAWN_SETSIGMASK;
+
+            if libc_spawn::posix_spawnattr_setsigmask(&mut attr as _, &mut set.extra.old_mask as _) != 0 {
+                fatal!("posix_spawnattr_setsigmask: {}", errno::errno());
+            }
+            // Signals which are set to be caught in the calling process image are set to
+            // default action in the new process image, so no explicit
+            // POSIX_SPAWN_SETSIGDEF parameter is needed.
+
+            if !self.use_console {
+                // Put the child in its own process group, so ctrl-c won't reach it.
+                flags |= libc_spawn::POSIX_SPAWN_SETPGROUP;
+                // No need to posix_spawnattr_setpgroup(&attr, 0), it's the default.
+                
+                // Open /dev/null over stdin.
+                let dev_null = ffi::CString::new("/dev/null").unwrap();
+                if libc_spawn::posix_spawn_file_actions_addopen(&mut action as _, 0, dev_null.as_ptr(), libc::O_RDONLY, 0) != 0 {
+                    fatal!("posix_spawn_file_actions_addopen: {}", errno::errno());
+                }
+                if libc_spawn::posix_spawn_file_actions_adddup2(&mut action as _, pipe1, 1) != 0 {
+                    fatal!("posix_spawn_file_actions_adddup2: {}", errno::errno());
+                }
+                if libc_spawn::posix_spawn_file_actions_adddup2(&mut action as _, pipe1, 2) != 0 {
+                    fatal!("posix_spawn_file_actions_adddup2: {}", errno::errno());
+                }
+                if libc_spawn::posix_spawn_file_actions_addclose(&mut action as _, pipe1) != 0  {
+                    fatal!("posix_spawn_file_actions_addclose: {}", errno::errno());
+                }
+                // In the console case, output_pipe is still inherited by the child and
+                // closed when the subprocess finishes, which then notifies ninja.
+            }
+            if let Some(v) = libc_spawn::optional_const::posix_spawn_usevfork() {
+                flags |= v;
+            }
+
+            if libc_spawn::posix_spawnattr_setflags(&mut attr as _, flags) != 0 {
+                fatal!("posix_spawnattr_setflags: {}", errno::errno());
+            }
+
+            let spawned_args0 = ffi::CString::new("/bin/sh").unwrap();
+            let spawned_args1 = ffi::CString::new("-c").unwrap();
+            let spawned_args2 = ffi::CString::from_vec_unchecked(command.to_owned());
+            let mut spawned_args = [spawned_args0.as_ptr(), 
+                  spawned_args1.as_ptr(), spawned_args2.as_ptr(), ptr::null_mut()];
+            self.extra.pid = Some(-1);
+            if libc_spawn::posix_spawn(self.extra.pid.as_mut().unwrap() as _,
+                spawned_args0.as_ptr(), &mut action as _, &mut attr as _,
+                spawned_args.as_mut_ptr(), libc_spawn::optional_const::environ()) != 0 {
+                self.extra.pid = None;
+                fatal!("posix_spawn: {}", errno::errno());
+            }
+
+            if libc_spawn::posix_spawnattr_destroy(&mut attr as _) != 0 {
+                fatal!("posix_spawnattr_destroy: {}", errno::errno());
+            }
+
+            if libc_spawn::posix_spawn_file_actions_destroy(&mut action as _) != 0 {
+                fatal!("posix_spawn_file_actions_destroy: {}", errno::errno());
+            }
+
+            libc::close(pipe1);
+        }
+        true
     }
 
     fn done(&self) -> bool {
@@ -415,9 +520,36 @@ impl Subprocess {
     /// Returns ExitSuccess on successful process exit, ExitInterrupted if
     /// the process was interrupted, ExitFailure if it otherwise failed.
     pub fn finish(&mut self) -> ExitStatus {
-        unimplemented!()
+        use libc;
+        use errno;
+
+        debug_assert!(self.extra.pid.is_some());
+        unsafe {
+            let mut status: libc::c_int = 0;
+            let pid = self.extra.pid.unwrap();
+            if libc::waitpid(pid, &mut status as _, 0) < 0 {
+                fatal!("waitpid({}): {}", pid, errno::errno());
+            }
+
+            self.extra.pid = None;
+            if libc::WIFEXITED(status) {
+                let exit = libc::WEXITSTATUS(status);
+                if exit == 0 {
+                    return ExitStatus::ExitSuccess;
+                }
+            } else if libc::WIFSIGNALED(status) {
+                match libc::WTERMSIG(status) {
+                libc::SIGINT | libc::SIGTERM | libc::SIGHUP => {
+                    return ExitStatus::ExitInterrupted;
+                },
+                _ => {},
+                }
+            }
+        }
+        return ExitStatus::ExitFailure;
     }
 }
+
 
 /*
 struct Subprocess {
@@ -502,14 +634,80 @@ impl SubprocessSetOs {
     }
 }
 
+#[cfg(unix)]
+thread_local! {
+    static INTERRUPTED : ::std::cell::Cell<::libc::c_int> =
+        ::std::cell::Cell::new(0);
+}
 
 #[cfg(unix)]
-struct SubprocessSetOs {}
+unsafe extern "C" fn set_interrupted_flag(signum: ::libc::c_int) {
+    unimplemented!{}
+}
+
+#[cfg(unix)]
+struct SubprocessSetOs {
+    old_int_act: ::libc::sigaction,
+    old_term_act: ::libc::sigaction,
+    old_hup_act: ::libc::sigaction,
+    old_mask:    ::libc::sigset_t,
+}
 
 #[cfg(unix)]
 impl SubprocessSetOs {
     pub fn new() -> Self {
-        unimplemented!()
+        use std::mem;
+        use libc;
+        use errno;
+
+        let mut v = unsafe { mem::zeroed::<Self>() };
+        unsafe {
+            let mut set = mem::zeroed::<libc::sigset_t>();
+            libc::sigemptyset(&mut set as _);
+            libc::sigaddset(&mut set as _, libc::SIGINT);
+            libc::sigaddset(&mut set as _, libc::SIGTERM);
+            libc::sigaddset(&mut set as _, libc::SIGHUP);
+            if libc::sigprocmask(libc::SIG_BLOCK, &mut set as _, &mut v.old_mask as _) < 0 {
+                fatal!("sigprocmask: {}", errno::errno());
+            }
+
+            let mut act = mem::zeroed::<libc::sigaction>();
+            act.sa_sigaction = set_interrupted_flag as _;
+
+            if libc::sigaction(libc::SIGINT, &mut act as _, &mut v.old_int_act) < 0
+              || libc::sigaction(libc::SIGTERM, &mut act as _, &mut v.old_term_act) < 0
+              || libc::sigaction(libc::SIGHUP, &mut act as _, &mut v.old_hup_act) < 0 {
+                fatal!("sigaction: {}", errno::errno());
+            }
+
+            if libc::sigprocmask(libc::SIG_BLOCK, &mut set as _, &mut v.old_mask as _) < 0 {
+                fatal!("sigprocmask: {}", errno::errno());
+            }      
+        }       
+
+        v
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SubprocessSetOs {
+    fn drop(&mut self) {
+        use libc;
+        use errno;
+        use std::ptr;
+
+        unsafe {
+            if libc::sigaction(libc::SIGINT, &mut self.old_int_act, ptr::null_mut()) < 0
+              || libc::sigaction(libc::SIGTERM, &mut self.old_term_act, ptr::null_mut()) < 0
+              || libc::sigaction(libc::SIGHUP, &mut self.old_hup_act, ptr::null_mut()) < 0 {
+                fatal!("sigaction: {}", errno::errno());
+            }
+
+            if libc::sigprocmask(libc::SIG_SETMASK, &mut self.old_mask as _, ptr::null_mut()) < 0 {
+                fatal!("sigprocmask: {}", errno::errno());
+            }
+
+        }        
     }
 }
 
@@ -647,6 +845,31 @@ impl<Data> SubprocessSet<Data> {
         unimplemented!()
     }
 }
+
+#[cfg(all(unix, 
+          not(any(target_env = "uclibc", target_env = "newlib")),
+          any(target_os = "linux",
+              target_os = "android",
+              target_os = "emscripten",
+              target_os = "fuchsia")))]
+impl<Data> SubprocessSet<Data> {
+    pub fn use_ppoll(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(all(unix, 
+          any(target_env = "uclibc", target_env = "newlib"),
+          not(any(target_os = "linux",
+                  target_os = "android",
+                  target_os = "emscripten",
+                  target_os = "fuchsia"))))]
+impl<Data> SubprocessSet<Data> {
+    pub fn use_ppoll(&self) -> bool {
+        false
+    }
+}
+
 
 /*
 struct SubprocessSet {
