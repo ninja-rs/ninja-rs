@@ -513,6 +513,27 @@ impl Subprocess {
         true
     }
 
+    pub fn on_pipe_ready(&mut self) {
+        use libc;
+        use errno;
+        use std::mem;
+
+        unsafe {
+            let fd = self.extra.fd.unwrap_or(-1);
+            let mut buf = [0u8; 4096];
+            let len = libc::read(fd, buf.as_mut_ptr() as usize as _, mem::size_of_val(&buf));
+            if len < 0 {
+                fatal!("read: {}", errno::errno());
+            } else if len > 0 {
+                self.buf.extend_from_slice(&buf[0..len as usize]);
+            } else {
+                libc::close(fd);
+                self.extra.fd = None;
+            }
+        }
+
+    }
+
     fn done(&self) -> bool {
         self.extra.fd.is_none()
     }
@@ -642,8 +663,35 @@ thread_local! {
 
 #[cfg(unix)]
 unsafe extern "C" fn set_interrupted_flag(signum: ::libc::c_int) {
-    unimplemented!{}
+    INTERRUPTED.with(|x| x.set(signum));
 }
+
+#[cfg(unix)]
+unsafe fn handle_pending_interruption() {
+    use libc;
+    use std::mem;
+    use errno;
+
+    let mut pending = mem::zeroed::<libc::sigset_t>();
+    libc::sigemptyset(&mut pending as _);
+    if libc::sigpending(&mut pending as _) == -1 {
+        fatal!("ninja: sigpending: {}", errno::errno());
+    }
+
+    if libc::sigismember(&mut pending as _, libc::SIGINT) != 0 {
+        INTERRUPTED.with(|x| x.set(libc::SIGINT));
+    } else if libc::sigismember(&mut pending as _, libc::SIGTERM) != 0 {
+        INTERRUPTED.with(|x| x.set(libc::SIGTERM));
+    } else if libc::sigismember(&mut pending as _, libc::SIGHUP) != 0 {
+        INTERRUPTED.with(|x| x.set(libc::SIGHUP));
+    }
+}
+
+#[cfg(unix)]
+fn is_interrupted() -> bool { 
+    return INTERRUPTED.with(|x| x.get() != 0);
+}
+
 
 #[cfg(unix)]
 struct SubprocessSetOs {
@@ -840,10 +888,7 @@ impl<Data> SubprocessSet<Data> {
 
 #[cfg(unix)]
 impl<Data> SubprocessSet<Data> {
-    // return Err(()) if interrupted.
-    pub fn do_work(&mut self) -> Result<(), ()> {
-        unimplemented!()
-    }
+    
 }
 
 #[cfg(all(unix, 
@@ -856,6 +901,72 @@ impl<Data> SubprocessSet<Data> {
     pub fn use_ppoll(&self) -> bool {
         true
     }
+
+    // return Err(()) if interrupted.
+    pub fn do_work(&mut self) -> Result<(), ()> {
+        use std::mem;
+        use std::ptr;
+        use libc;
+        use errno;
+
+        unsafe {
+            let mut fds = Vec::new();
+            let mut nfds = 0 as libc::nfds_t;
+
+            self.running.iter().for_each(|p| {
+                if let Some(fd) = (p.1).0.extra.fd.clone() {
+                    fds.push(libc::pollfd {
+                        fd,
+                        events: libc::POLLIN | libc::POLLPRI,
+                        revents: 0,
+                    });
+                    nfds += 1;
+                }
+            });
+            INTERRUPTED.with(|x| x.set(0));
+            let ret = libc::ppoll(fds.as_mut_ptr(), nfds, ptr::null_mut(), &mut self.extra.old_mask as _);
+            if ret == -1 {
+                let errno = errno::errno();
+                if errno.0 != libc::EINTR {
+                    fatal!("ninja: ppoll: {}", errno);
+                } else if is_interrupted() {
+                    return Err(());
+                } else {
+                    return Ok(());
+                }
+            }
+
+            handle_pending_interruption();
+
+            if is_interrupted() {
+                return Err(());
+            } 
+
+            let mut removals = Vec::new();
+
+            self.running.iter_mut().enumerate().for_each(|(n, p)| {
+                if let Some(fd) = (p.1).0.extra.fd.clone() {
+                    debug_assert!(fd == fds[n].fd);
+                    if fds[n].revents != 0 {
+                        (p.1).0.on_pipe_ready();
+                        if (p.1).0.done() {
+                            removals.push(*p.0);
+                        }
+                    }
+                }
+            });
+
+            removals.into_iter().for_each(|p| {
+                self.finished.extend(self.running.remove(&p));
+            });
+
+            if is_interrupted() {
+                return Err(());
+            } else {
+                return Ok(());
+            }
+        }
+    }
 }
 
 #[cfg(all(unix, 
@@ -867,6 +978,68 @@ impl<Data> SubprocessSet<Data> {
 impl<Data> SubprocessSet<Data> {
     pub fn use_ppoll(&self) -> bool {
         false
+    }
+
+
+    // return Err(()) if interrupted.
+    pub fn do_work(&mut self) -> Result<(), ()> {
+        use std::mem;
+        use libc;
+        use errno;
+
+        unsafe {
+            let mut set = mem::zeroed::<libc::fd_set>();
+            let mut nfds = 0;
+            libc::FD_ZERO(&mut set as _);
+
+            self.running.iter().for_each(|p| {
+                if let Some(fd) = (p.1).0.extra.fd.clone() {
+                    libc::FD_SET(fd, &mut set as _);
+                    nfds = std::cmp::max(nfds, fd + 1);
+                }
+            });
+            INTERRUPTED.with(|x| x.set(0));
+            let ret = libc::pselect(nfds, &mut set as _, 0, 0, 0, &mut self.extra.old_mask as _);
+            if ret == -1 {
+                let errno = errno::errno();
+                if errno.0 != libc::EINTR {
+                    fatal!("ninja: pselect: {}", errno);
+                } else if is_interrupted() {
+                    return Err(());
+                } else {
+                    return Ok(());
+                }
+            }
+
+            handle_pending_interruption();
+
+            if is_interrupted() {
+                return Err(());
+            } 
+
+            let mut removals = Vec::new();
+
+            self.running.iter_mut().for_each(|p| {
+                if let Some(fd) = (p.1).0.extra.fd.clone() {
+                    if libc::FD_ISSET(fd, &mut set as _) {
+                        (p.1).0.on_pipe_ready();
+                        if (p.1).0.done() {
+                            removals.push(*p.0);
+                        }
+                    }
+                }
+            });
+
+            removals.into_iter().for_each(|p| {
+                self.finished.extend(self.running.remove(&p));
+            });
+
+            if is_interrupted() {
+                return Err(());
+            } else {
+                return Ok(());
+            }
+        }
     }
 }
 
