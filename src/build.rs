@@ -887,6 +887,7 @@ where
       }
     }
 */
+            return Ok(Vec::new());
             unimplemented!{}
         } else {
             fatal!("unknown deps type '{}'", String::from_utf8_lossy(deps_type));
