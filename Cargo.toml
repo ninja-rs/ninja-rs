@@ -1,6 +1,6 @@
 [package]
-name = "ninja"
-version = "1.8.2-git"
+name = "ninja-build"
+version = "0.0.1"
 authors = ["CrLF0710 <crlf0710@gmail.com>"]
 
 [dependencies]
@@ -21,7 +21,7 @@ widestring = "0.2"
 wstr = {version = "0.2", features = ["widestring"]}
 
 [target."cfg(unix)".dependencies]
-libc-spawn = {git = "https://github.com/crlf0710/libc-spawn"}
+libc-spawn = "0.0.1"
 
 [build-dependencies]
 cc = "1"
