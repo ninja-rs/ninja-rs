@@ -17,7 +17,7 @@ extern crate clap;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
-extern crate ninja;
+extern crate ninja_build as ninja;
 
 use std::path::{Path, PathBuf};
 

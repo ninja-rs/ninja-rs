@@ -1,5 +1,5 @@
 // Copyright 2011 Google Inc. All Rights Reserved.
-// Copyright 2017 Ninja-rs Authors. All Rights Reserved.
+// Copyright 2017 The Ninja-rs Project Developers. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
